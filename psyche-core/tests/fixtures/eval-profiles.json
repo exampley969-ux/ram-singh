@@ -1,0 +1,192 @@
+{
+ "note": "Fixed evaluation set for insight quality. Expectations are reviewed properties (counts, ids, confidence caps, abstention), not exact prose. Changing an expectation is a reviewed decision.",
+ "default_quality": {
+  "consistency": 0.8,
+  "engagement": 0.7,
+  "straightLining": false,
+  "spread": 1
+ },
+ "profiles": [
+  {
+   "name": "balanced-all-50",
+   "overrides": {},
+   "expect": {
+    "max": 0,
+    "abstained": null
+   }
+  },
+  {
+   "name": "all-mid-range",
+   "fill": 52,
+   "overrides": {},
+   "expect": {
+    "max": 0,
+    "abstained": null
+   }
+  },
+  {
+   "name": "all-high",
+   "fill": 90,
+   "overrides": {},
+   "expect": {
+    "min": 3,
+    "max": 5,
+    "mustInclude": [
+     "pace-risk.hi-hi"
+    ],
+    "noMoreThan": {
+     "confidence": "moderate"
+    }
+   }
+  },
+  {
+   "name": "all-low",
+   "fill": 10,
+   "overrides": {},
+   "expect": {
+    "min": 3,
+    "max": 5,
+    "mustInclude": [
+     "pace-risk.lo-lo"
+    ]
+   }
+  },
+  {
+   "name": "vision-without-scale",
+   "overrides": {
+    "P.abstraction": 85,
+    "M.ambition": 20
+   },
+   "expect": {
+    "mustInclude": [
+     "vision-to-scale.hi-lo"
+    ]
+   }
+  },
+  {
+   "name": "explorer-low-finish",
+   "overrides": {
+    "P.curiosity": 90,
+    "M.persistence": 15
+   },
+   "expect": {
+    "mustInclude": [
+     "explore-finish.hi-lo"
+    ]
+   }
+  },
+  {
+   "name": "fast-but-careful",
+   "overrides": {
+    "R.tempo": 88,
+    "R.risk": 15
+   },
+   "expect": {
+    "mustInclude": [
+     "pace-risk.hi-lo"
+    ]
+   }
+  },
+  {
+   "name": "firm-views-low-curiosity",
+   "overrides": {
+    "I.conviction": 88,
+    "P.curiosity": 20
+   },
+   "expect": {
+    "mustInclude": [
+     "conviction-curiosity.hi-lo"
+    ]
+   }
+  },
+  {
+   "name": "warm-and-agreeable",
+   "overrides": {
+    "S.empathy": 85,
+    "S.harmony": 85
+   },
+   "expect": {
+    "mustInclude": [
+     "empathy-boundary.hi-hi"
+    ]
+   }
+  },
+  {
+   "name": "fragile-threshold",
+   "overrides": {
+    "R.tempo": 63,
+    "R.risk": 90
+   },
+   "expect": {
+    "mustInclude": [
+     "pace-risk.hi-hi"
+    ],
+    "confidenceOf": {
+     "pace-risk.hi-hi": "limited"
+    }
+   }
+  },
+  {
+   "name": "straight-lined",
+   "overrides": {
+    "R.tempo": 90,
+    "R.risk": 90
+   },
+   "quality": {
+    "consistency": 0.8,
+    "engagement": 0.01,
+    "straightLining": true,
+    "spread": 0
+   },
+   "expect": {
+    "max": 0,
+    "abstained": "low_variation"
+   }
+  },
+  {
+   "name": "eight-skipped",
+   "overrides": {
+    "R.tempo": 90,
+    "R.risk": 90
+   },
+   "extra": {
+    "skipped": 8
+   },
+   "expect": {
+    "max": 0,
+    "abstained": "too_many_skipped"
+   }
+  },
+  {
+   "name": "three-skipped",
+   "overrides": {
+    "R.tempo": 90,
+    "R.risk": 90
+   },
+   "extra": {
+    "skipped": 3
+   },
+   "expect": {
+    "min": 1,
+    "abstained": null,
+    "noMoreThan": {
+     "confidence": "limited"
+    }
+   }
+  },
+  {
+   "name": "no-quality-metadata",
+   "overrides": {
+    "R.tempo": 90,
+    "R.risk": 90
+   },
+   "quality": null,
+   "expect": {
+    "min": 1,
+    "noMoreThan": {
+     "confidence": "limited"
+    }
+   }
+  }
+ ]
+}

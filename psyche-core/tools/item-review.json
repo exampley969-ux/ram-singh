@@ -1,0 +1,385 @@
+{
+ "reviewedBy": "analyst desk review (Phase 3) - NOT an expert panel and NOT participant cognitive interviews",
+ "vocabulary": {
+  "double_barrelled": "asks about two things at once",
+  "absolute_wording": "extreme words (always, every, almost as my own) that compress responses",
+  "leading_or_desirable": "agreeing sounds like the reasonable or admirable answer",
+  "idiom_or_cultural": "figurative or culture-bound phrasing",
+  "construct_overlap": "close to an item of another facet; test discriminant validity",
+  "not_true_opposite": "keyed as the opposite pole but the two statements can both be true",
+  "sensitive_wording": "phrasing that may read as a judgement about a person"
+ },
+ "items": [
+  {
+   "index": 1,
+   "flags": [],
+   "severity": "low",
+   "note": "Forced-choice comparison (\"rather than\"), not a pure agree/disagree statement; \"theory\" vs \"checklist of facts\" mixes abstraction with dislike of procedure.",
+   "proposal": null,
+   "textHash": "2a3e5665"
+  },
+  {
+   "index": 2,
+   "flags": [
+    "not_true_opposite"
+   ],
+   "severity": "low",
+   "note": "Pairs with item 1 as a pole, but \"trust\" (epistemic stance) differs from \"prefer\" (activity preference); keyed opposite.",
+   "proposal": null,
+   "textHash": "9b0e0b6d"
+  },
+  {
+   "index": 3,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear, single idea.",
+   "proposal": null,
+   "textHash": "893f57bc"
+  },
+  {
+   "index": 4,
+   "flags": [
+    "leading_or_desirable"
+   ],
+   "severity": "low",
+   "note": "\"Happiest\" adds an affect component beyond preference for the familiar.",
+   "proposal": "I prefer to stick with what I already know works.",
+   "textHash": "6d3ba2d8"
+  },
+  {
+   "index": 5,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear. Close to the construct label \"Panoramic\".",
+   "proposal": null,
+   "textHash": "ee016e2a"
+  },
+  {
+   "index": 6,
+   "flags": [
+    "absolute_wording",
+    "not_true_opposite"
+   ],
+   "severity": "medium",
+   "note": "\"Tune everything else out\" is extreme; and wide vs narrow attention are not logical opposites (a person can do both), so the pair may show weak negative aligned correlation.",
+   "proposal": "I tend to concentrate on one thing at a time.",
+   "textHash": "bdd09b7f"
+  },
+  {
+   "index": 7,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear. Self-insight item (\"before I can explain it\") is hard to verify but common in intuition scales.",
+   "proposal": null,
+   "textHash": "14ba0dda"
+  },
+  {
+   "index": 8,
+   "flags": [
+    "not_true_opposite",
+    "sensitive_wording"
+   ],
+   "severity": "medium",
+   "note": "Literal interpretation is a different construct from low pattern-sensing; wording can read as pathologising communication style.",
+   "proposal": "I prefer information stated explicitly to reading between the lines.",
+   "textHash": "1fef2215"
+  },
+  {
+   "index": 9,
+   "flags": [
+    "double_barrelled"
+   ],
+   "severity": "medium",
+   "note": "\"Decide quickly\" and \"adjust as I go\" are two behaviours; overlaps with adaptability.",
+   "proposal": "I make decisions quickly.",
+   "textHash": "4fe65501"
+  },
+  {
+   "index": 10,
+   "flags": [],
+   "severity": "low",
+   "note": "Reasonable. Overlaps conceptually with discipline/planning but keyed to decision timing.",
+   "proposal": null,
+   "textHash": "2540d099"
+  },
+  {
+   "index": 11,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear, observer-based rather than self-experience.",
+   "proposal": null,
+   "textHash": "2eeabe76"
+  },
+  {
+   "index": 12,
+   "flags": [],
+   "severity": "low",
+   "note": "Expression vs concealment; \"to myself\" may also capture introversion (overlap with gregariousness).",
+   "proposal": null,
+   "textHash": "a674b130"
+  },
+  {
+   "index": 13,
+   "flags": [
+    "construct_overlap"
+   ],
+   "severity": "low",
+   "note": "Overlaps with R.tempo item 9 (\"adjust as I go\") and M.discipline; check facet correlations.",
+   "proposal": null,
+   "textHash": "372967fb"
+  },
+  {
+   "index": 14,
+   "flags": [
+    "construct_overlap"
+   ],
+   "severity": "medium",
+   "note": "Near-duplicate of M.discipline item 35 (\"systems and plans\"); expect high cross-facet correlation.",
+   "proposal": null,
+   "textHash": "6102be57"
+  },
+  {
+   "index": 15,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear.",
+   "proposal": null,
+   "textHash": "413cf13d"
+  },
+  {
+   "index": 16,
+   "flags": [],
+   "severity": "low",
+   "note": "Clear; \"protect against the downside\" is abstract for some readers.",
+   "proposal": "I think about what could go wrong before I act.",
+   "textHash": "9667797b"
+  },
+  {
+   "index": 17,
+   "flags": [
+    "double_barrelled"
+   ],
+   "severity": "low",
+   "note": "Contrast clause (\"not the crowd's\") adds a second idea; socially desirable framing (independence).",
+   "proposal": "I rely on my own judgment when deciding what to do.",
+   "textHash": "f01d96ce"
+  },
+  {
+   "index": 18,
+   "flags": [],
+   "severity": "low",
+   "note": "Deference is less socially desirable to endorse; expect ceiling effects toward disagreement.",
+   "proposal": null,
+   "textHash": "45bd375a"
+  },
+  {
+   "index": 19,
+   "flags": [
+    "absolute_wording"
+   ],
+   "severity": "low",
+   "note": "\"Hard to move\" fine, but the item measures stubbornness behaviour more than belief strength.",
+   "proposal": null,
+   "textHash": "a20c1eca"
+  },
+  {
+   "index": 20,
+   "flags": [
+    "leading_or_desirable"
+   ],
+   "severity": "medium",
+   "note": "\"When I hear a good point\" makes agreement the reasonable-sounding answer; likely acquiescent/desirable skew.",
+   "proposal": "I often change my mind.",
+   "textHash": "e4b8e42b"
+  },
+  {
+   "index": 21,
+   "flags": [
+    "double_barrelled",
+    "leading_or_desirable"
+   ],
+   "severity": "low",
+   "note": "\"Stand apart\" and \"from everyone else\" combine uniqueness with comparison; fairly extreme.",
+   "proposal": "I like to be different from other people.",
+   "textHash": "19ced579"
+  },
+  {
+   "index": 22,
+   "flags": [
+    "double_barrelled"
+   ],
+   "severity": "medium",
+   "note": "\"Blend in\" and \"belong\" are different aims (conformity vs affiliation); belonging overlaps with warmth and harmony.",
+   "proposal": "I would rather fit in than stand out.",
+   "textHash": "62e24602"
+  },
+  {
+   "index": 23,
+   "flags": [
+    "absolute_wording"
+   ],
+   "severity": "medium",
+   "note": "\"Every situation\" invites disagreement for almost everyone, compressing scores and creating a ceiling at the low end.",
+   "proposal": "I behave much the same way in different situations.",
+   "textHash": "ca287783"
+  },
+  {
+   "index": 24,
+   "flags": [],
+   "severity": "low",
+   "note": "Clear; \"different person\" is figurative.",
+   "proposal": null,
+   "textHash": "3864feb2"
+  },
+  {
+   "index": 25,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear.",
+   "proposal": null,
+   "textHash": "4f3ef61f"
+  },
+  {
+   "index": 26,
+   "flags": [
+    "construct_overlap"
+   ],
+   "severity": "low",
+   "note": "Keyed opposite to item 25 but \"cool distance until earned closeness\" also overlaps with trust and with introversion.",
+   "proposal": null,
+   "textHash": "cbcef9cd"
+  },
+  {
+   "index": 27,
+   "flags": [],
+   "severity": "low",
+   "note": "Clear. Pairs with item 28; nearest to extraversion, so expect overlap with warmth.",
+   "proposal": null,
+   "textHash": "9f7981e2"
+  },
+  {
+   "index": 28,
+   "flags": [],
+   "severity": "none",
+   "note": "Clear, though \"recharge\" is jargon-light and common.",
+   "proposal": null,
+   "textHash": "cea464de"
+  },
+  {
+   "index": 29,
+   "flags": [
+    "absolute_wording"
+   ],
+   "severity": "medium",
+   "note": "\"Almost as my own\" is extreme; endorsement will be rare and may measure emotional contagion rather than empathy.",
+   "proposal": "I easily feel what other people are feeling.",
+   "textHash": "e2dd3440"
+  },
+  {
+   "index": 30,
+   "flags": [
+    "idiom_or_cultural",
+    "not_true_opposite"
+   ],
+   "severity": "medium",
+   "note": "\"Head before my heart\" is an idiom that may not translate; and cognitive-first processing is not the opposite of feeling others' emotions (a person can do both).",
+   "proposal": "I tend to analyse a situation before reacting emotionally.",
+   "textHash": "8f081772"
+  },
+  {
+   "index": 31,
+   "flags": [],
+   "severity": "low",
+   "note": "Clear. Smoothing over conflict is partly desirable, partly not; wording neutral.",
+   "proposal": null,
+   "textHash": "b5a1cd8c"
+  },
+  {
+   "index": 32,
+   "flags": [],
+   "severity": "low",
+   "note": "\"Hard thing\" is vague (what hard thing?); mild desirability for candour.",
+   "proposal": null,
+   "textHash": "1e33c77d"
+  },
+  {
+   "index": 33,
+   "flags": [
+    "absolute_wording"
+   ],
+   "severity": "medium",
+   "note": "\"Always reaching\" is extreme; combines ambition with restlessness.",
+   "proposal": "I usually have a next goal in mind.",
+   "textHash": "67108631"
+  },
+  {
+   "index": 34,
+   "flags": [],
+   "severity": "low",
+   "note": "\"Enough\" is undefined; may be read as contentment (positive) rather than low drive.",
+   "proposal": null,
+   "textHash": "1f1376b5"
+  },
+  {
+   "index": 35,
+   "flags": [
+    "absolute_wording",
+    "construct_overlap"
+   ],
+   "severity": "medium",
+   "note": "\"My life\" is broad; overlaps with R.adaptability item 14 (stick to the plan).",
+   "proposal": "I plan my days and weeks in advance.",
+   "textHash": "07cfb05c"
+  },
+  {
+   "index": 36,
+   "flags": [],
+   "severity": "low",
+   "note": "Clear; contrasts \"open\" with systems, mixing spontaneity with disorganisation.",
+   "proposal": null,
+   "textHash": "a51b5235"
+  },
+  {
+   "index": 37,
+   "flags": [
+    "double_barrelled",
+    "construct_overlap"
+   ],
+   "severity": "medium",
+   "note": "\"Think big\" and \"want to build something large\" are two statements; overlaps with M.drive.",
+   "proposal": "I want to achieve something large.",
+   "textHash": "1e288390"
+  },
+  {
+   "index": 38,
+   "flags": [
+    "construct_overlap"
+   ],
+   "severity": "low",
+   "note": "\"Enough, not grand\" duplicates drive item 34 (\"content once I have enough\") almost verbatim.",
+   "proposal": null,
+   "textHash": "b3487fa2"
+  },
+  {
+   "index": 39,
+   "flags": [
+    "double_barrelled",
+    "leading_or_desirable"
+   ],
+   "severity": "medium",
+   "note": "Finishing is socially desirable; \"even when it drags\" adds a second condition.",
+   "proposal": "I finish what I start.",
+   "textHash": "da3ad23d"
+  },
+  {
+   "index": 40,
+   "flags": [
+    "double_barrelled"
+   ],
+   "severity": "medium",
+   "note": "Two behaviours (\"chase what excites me\" / \"move on quickly\"); overlaps with P.curiosity.",
+   "proposal": "I lose interest in things quickly.",
+   "textHash": "1509c960"
+  }
+ ]
+}
