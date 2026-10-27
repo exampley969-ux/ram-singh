@@ -1,0 +1,5 @@
+Contact: mailto:exampley969@gmail.com
+Expires: 2027-10-23T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://psyche.monster/.well-known/security.txt
+# TODO(owner): replace the contact with a monitored security address.

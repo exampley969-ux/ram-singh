@@ -1,0 +1,3203 @@
+/* ============================================================
+   PSYCHE CORE — pure personality-analysis build
+   Stripped from Psyche v57.2: kept the assessment, PRISM scoring,
+   36-archetype classification, 20-facet breakdown, signature-trait
+   synthesis, Career Fit, and Relationship Style — all deterministic,
+   all client-side, nothing sent anywhere.
+   Auth: optional Supabase accounts (see auth.js / config.js) sync the result.
+   Deliberately removed: Journal/Growth history,
+   Braindump, CBT Coach, Compatibility/Match, Group Session, Conflict
+   Decoder (that one only ever existed as a two-person/compatibility
+   feature in the source app — there's no personal-only version of it).
+   ============================================================ */
+(function () {
+'use strict';
+
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]; }); }
+
+/* ---------------- RADAR CHART (Compatibility) ---------------- */
+function radarSVG(a, b, an, bn, size) {
+  size = size || 220;
+  var cx = size / 2, cy = size / 2, R = size / 2 - 34, n = DIM_ORDER.length;
+  function ptAbs(i, r) { var ang = (-90 + i * (360 / n)) * Math.PI / 180; return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)]; }
+  function poly(dimsObj) { return DIM_ORDER.map(function (d, i) { var p = ptAbs(i, R * (dimsObj[d] / 100)); return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' '); }
+  var rings = [0.25, 0.5, 0.75, 1].map(function (f) {
+    var pts = DIM_ORDER.map(function (_, i) { var p = ptAbs(i, R * f); return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
+    return '<polygon points="' + pts + '" fill="none" stroke="var(--line)" stroke-width="1"/>';
+  }).join('');
+  var axes = DIM_ORDER.map(function (d, i) {
+    var p = ptAbs(i, R);
+    return '<line x1="' + cx + '" y1="' + cy + '" x2="' + p[0].toFixed(1) + '" y2="' + p[1].toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>';
+  }).join('');
+  var labels = DIM_ORDER.map(function (d, i) {
+    var p = ptAbs(i, R + 16);
+    return '<text x="' + p[0].toFixed(1) + '" y="' + p[1].toFixed(1) + '" font-size="10" font-weight="700" fill="var(--faint)" text-anchor="middle" dominant-baseline="middle">' + d + '</text>';
+  }).join('');
+  var polyA = '<polygon points="' + poly(a) + '" fill="var(--ink)" fill-opacity="0.16" stroke="var(--ink)" stroke-width="2"/>';
+  var polyB = '<polygon points="' + poly(b) + '" fill="var(--S)" fill-opacity="0.14" stroke="var(--S)" stroke-width="2" stroke-dasharray="4,3"/>';
+  var legend = '<div class="row center mt8" style="justify-content:center;gap:16px;font-size:12px;color:var(--faint)">' +
+    '<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--ink);margin-right:5px"></span>' + esc(an) + '</span>' +
+    '<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--S);margin-right:5px;border:1px dashed var(--S)"></span>' + esc(bn) + '</span></div>';
+  return '<svg viewBox="0 0 ' + size + ' ' + size + '" width="' + size + '" height="' + size + '">' + rings + axes + polyA + polyB + labels + '</svg>' + legend;
+}
+
+var FACET_DOMAINS = {
+  'P.abstraction': 'how you take in information', 'P.curiosity': 'how you relate to novelty',
+  'P.attention': 'how wide your attention spreads', 'P.intuition': 'how you extract meaning from a situation',
+  'R.tempo': 'how fast you act on new information', 'R.expression': 'how openly you show what you feel',
+  'R.adaptability': 'how you handle a changed plan', 'R.risk': 'how you weigh a bet before taking it',
+  'I.autonomy': 'whose judgment you steer by', 'I.conviction': 'how firmly you hold a belief',
+  'I.distinct': 'whether you aim to stand apart or belong', 'I.stability': 'how stable your self-view is across contexts',
+  'S.warmth': 'how you lead with people', 'S.gregarious': 'where you recharge',
+  'S.empathy': 'how you read other people\u2019s states', 'S.harmony': 'how you handle group friction',
+  'M.drive': 'what keeps you reaching for more', 'M.discipline': 'how you structure your effort',
+  'M.ambition': 'how big you aim', 'M.persistence': 'how you sustain effort over time',
+};
+
+function buildFacetDefs() {
+  var out = {};
+  DIM_ORDER.forEach(function (d) {
+    Object.keys(DIMS[d].facets).forEach(function (fk) {
+      var key = d + '.' + fk, fac = DIMS[d].facets[fk];
+      out[key] = { domain: FACET_DOMAINS[key] || ('your ' + fac.name.toLowerCase()), hi: fac.hi, lo: fac.lo };
+    });
+  });
+  return out;
+}
+
+var STORE_KEY = 'psyche_core_v1';
+function load() {
+  var raw = null, o = {};
+  try { raw = localStorage.getItem(STORE_KEY); o = JSON.parse(raw) || {}; } catch (e) { o = {}; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) o = {};
+  if (o.result != null) {
+    var v = ProfileSchema.validate(o.result);
+    if (v.ok) o.result = v.value;
+    else {
+      // keep the rejected copy for recovery, but never render it
+      try { localStorage.setItem(STORE_KEY + '_rejected', raw); } catch (e) {}
+      o.result = null; o.resultAt = 0;
+      o.loadNotice = 'Your saved result could not be read (' + ProfileSchema.explain(v.errors) + '), so it was not loaded. You can retake the assessment.';
+    }
+  }
+  if (typeof o.theme !== 'string' || (o.theme !== 'light' && o.theme !== 'dark')) delete o.theme;
+  if (o.introSeen !== true) delete o.introSeen;
+  if (!isFinite(o.resultAt)) o.resultAt = 0;
+  if (typeof o.resultOwner !== 'string' || !o.resultOwner) delete o.resultOwner;   // account the saved result was last synced for (Phase 5)
+  if (o.syncPaused !== true) delete o.syncPaused;                                   // set after "delete my saved copy" so it is not silently re-uploaded
+  return o;
+}
+function save(state) { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {} }
+
+function prefersDark() {
+  try { return window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches; }
+  catch (e) { return false; }
+}
+
+var state = Object.assign({
+  screen: 'home',      // home | assessment | results
+  qIndex: 0,
+  answers: [],
+  result: null,         // { dims, facets, match, quality }
+  theme: (prefersDark() ? 'dark' : 'light'),
+  resultsTab: 'profile', // profile | facets | career | relationship
+  // --- accounts-based compare + groups (never persisted; loaded from Supabase after sign-in) ---
+  social: { loaded: false, connections: [], groups: [], members: [], profiles: {} },
+  socialMsg: null, socialBusy: false, displayName: '', nameReady: false,
+  delOpen: false, delBusy: false, delError: null,
+  compareWith: null, activeGroup: null, groupTab: 'overview', compatLens: 'partner', groupRankDim: 'S', groupPair: null, groupRenameDraft: '', inviteDraft: '', groupNameDraft: '', groupInviteDraft: '',
+  scienceTab: 'model',  // model | items | scoring | quality | archetype | compat | limits
+  // --- auth (never persisted) ---
+  user: null, authMode: 'signin', authEmail: '', authBusy: false, authError: null, authNotice: null,
+  syncStatus: null      // null | 'saving' | 'saved' | 'error' | 'offline' | 'paused'
+}, load());
+var AUTH = window.PsycheAuth || { enabled: false };
+// Replaces an inline onerror attribute (blocked by the CSP): hide an image that fails to load.
+document.addEventListener('error', function (e) { var t = e.target; if (t && t.tagName === 'IMG' && t.hasAttribute('data-hide-on-error')) t.remove(); }, true);
+
+function persist() { save({ result: state.result, resultAt: state.resultAt || 0, theme: state.theme, introSeen: !!state.introSeen, resultOwner: state.resultOwner || undefined, syncPaused: state.syncPaused === true ? true : undefined }); }
+
+/* ---------------- Phase 4: draft (resume), focus, announcements ---------------- */
+function ls() { try { return window.localStorage; } catch (e) { return null; } }
+function saveDraft() { PsycheUX.writeDraft(ls(), state.answers, state.qIndex); }
+function readDraft() { return PsycheUX.readDraft(ls()); }
+function skippedList() { var out = []; for (var i = 0; i < QUESTIONS.length; i++) if (state.answers[i] == null) out.push(i); return out; }
+function answeredCount() { return QUESTIONS.length - skippedList().length; }
+function announce(msg) {
+  var a = document.getElementById('announcer');
+  if (!a) { a = document.createElement('div'); a.id = 'announcer'; a.className = 'sr-only'; a.setAttribute('role', 'status'); a.setAttribute('aria-live', 'polite'); document.body.appendChild(a); }
+  a.textContent = ''; setTimeout(function () { a.textContent = msg; }, 30);
+}
+var TITLES = { home: 'Psyche Core \u00b7 PRISM self-reflection', intro: 'Before you start', assessment: 'Assessment', review: 'Review skipped questions', results: 'Your result', archlib: 'Archetype library', archdetail: 'Archetype', compare: 'Compare', group: 'Groups', science: 'The science', glossary: 'Glossary', auth: 'Account', account: 'Account', recovery: 'Reset password', error: 'Something went wrong' };
+function focusKeyOf(el) {
+  if (!el || !el.getAttribute) return null;
+  var act = el.getAttribute('data-act'); if (!act) return null;
+  return act + '|' + (el.getAttribute('data-tab') || el.getAttribute('data-lens') || el.getAttribute('data-dim') || el.getAttribute('data-id') || el.getAttribute('data-key') || el.getAttribute('data-v') || el.getAttribute('data-mode') || '');
+}
+function findByFocusKey(key) {
+  var parts = key.split('|'), els = document.querySelectorAll('[data-act="' + parts[0] + '"]');
+  for (var i = 0; i < els.length; i++) if (focusKeyOf(els[i]) === key) return els[i];
+  return null;
+}
+
+function applyTheme() { document.documentElement.setAttribute('data-theme', state.theme); }
+
+/* ---------------- SCORING PIPELINE ---------------- */
+function computeResult(answers) { return ProfileSchema.build(answers); }
+
+/* ---------------- RENDER ROOT ---------------- */
+function viewFor(screen) {
+  if (screen === 'home') return viewHome();
+  if (screen === 'intro') return viewIntro();
+  if (screen === 'assessment') return viewAssessment();
+  if (screen === 'review') return viewReview();
+  if (screen === 'results') return state.result ? viewResults() : viewNoResult();
+  if (screen === 'archlib') return viewArchLibrary();
+  if (screen === 'archdetail') return viewArchDetail();
+  if (screen === 'compare') return viewCompare();
+  if (screen === 'group') return viewGroup();
+  if (screen === 'science') return viewScience();
+  if (screen === 'glossary') return viewGlossary();
+  if (screen === 'auth') return viewAuth();
+  if (screen === 'account') return viewAccount();
+  if (screen === 'recovery') return viewRecovery();
+  return viewHome();
+}
+function viewError() {
+  return topbar('Psyche Core') + '<div class="wrap"><div class="hero"><h1 style="font-size:28px" tabindex="-1">Something went wrong showing this page</h1>' +
+    '<p class="sub mt12">Your saved result and any answers saved on this device have not been changed. Going back home usually fixes it. If it keeps happening, please tell us which page you were on.</p></div>' +
+    '<button class="btn primary block mt18" data-act="home">Back home</button></div>';
+}
+function viewNoResult() {
+  return topbar('Your result', 'home') + '<div class="wrap"><div class="hero"><h1 style="font-size:28px" tabindex="-1">No result on this device yet</h1>' +
+    '<p class="sub mt12">Take the 40-question assessment to see your profile. If you have an account, signing in loads the result saved there.</p></div>' +
+    '<button class="btn primary block mt18" data-act="start">Take the PRISM test</button>' +
+    (AUTH.enabled && !state.user ? '<button class="btn ghost block mt10" data-act="account">Sign in</button>' : '') +
+    '<button class="btn ghost block mt10" data-act="home">Back home</button></div>';
+}
+function bannersHTML() {
+  var h = '';
+  if (AUTH.configuredButUnavailable && state.screen === 'home') h += '<div class="banner" role="status">Account sign-in is unavailable right now (its code did not load, which usually means no connection). Everything else works without an account.</div>';
+  if (state.offline) h += '<div class="banner" role="status"><b>You are offline.</b> What is already open keeps working, including the assessment and your saved result. Signing in, syncing, comparing and groups need a connection.</div>';
+  if (state.notice) h += '<div class="banner warn" role="status"><span>' + esc(state.notice) + '</span> <button type="button" class="linkbtn" data-act="dismissnotice">Dismiss</button></div>';
+  return h;
+}
+function render() {
+  scrollBefore = window.scrollY || 0;
+  applyTheme();
+  var el = document.getElementById('app');
+  var prevKey = focusKeyOf(document.activeElement);
+  var screen = state.screen;
+  try { el.innerHTML = viewFor(state.screen); }
+  catch (e) { try { console.error('render failed on screen ' + screen + ' (' + String((e && e.name) || 'Error') + ')'); } catch (_) {} try { PsycheOps.report('render', { name: e && e.name, stack: e && typeof e.stack === 'string' ? e.stack : '', code: 'render_' + String(screen).replace(/[^a-z0-9_-]/gi, '').slice(0, 20) }); } catch (_) {}   /* no error object, message or state: they could contain answers */ screen = 'error'; el.innerHTML = viewError(); }
+  var same = (lastScreen === screen);
+  var wrap = el.querySelector('.wrap');
+  if (wrap) { wrap.id = 'main'; wrap.setAttribute('role', 'main'); wrap.setAttribute('tabindex', '-1'); var bn = bannersHTML(); if (bn) wrap.insertAdjacentHTML('afterbegin', bn); }
+  var tb = el.querySelector('.topbar'); if (tb) tb.setAttribute('role', 'banner');
+  document.title = (TITLES[screen] || 'Psyche Core') + (screen === 'home' ? '' : ' · Psyche Core');
+  if (!same) window.scrollTo(0, 0);
+  else if (screen === 'results') { /* keep scroll across tab changes */ window.scrollTo(0, keepY(el)); }
+  else if (screen !== 'assessment') window.scrollTo(0, scrollBefore);
+  if (!same) el.classList.add('screen-in'); else el.classList.remove('screen-in');
+  var firstPaint = (lastScreen === null);
+  lastScreen = screen;
+  wireActions();
+  afterRender();
+  wireLab();
+  // focus: a new screen or a new question moves focus to its heading; otherwise keep focus on the control that was used
+  try {
+    var target = null;
+    if (state.focus === 'question') target = document.getElementById('qtext');
+    else if (!same && !firstPaint) target = el.querySelector('h1') || wrap;
+    else if (prevKey) target = findByFocusKey(prevKey);
+    state.focus = null;
+    if (target && target.focus) { if (target.tagName !== 'BUTTON' && !target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }); }
+  } catch (e) {}
+}
+
+var lastScreen = null, scrollBefore = 0;
+function keepY(el) { return Math.min(scrollBefore, Math.max(0, document.documentElement.scrollHeight - window.innerHeight)); }
+
+/* toast */
+function toast(msg) {
+  var t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.remove('show'); }, 5000);
+}
+
+/* post-render: prism hero interaction, number count-up, topbar shadow */
+function afterRender() {
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var rays = document.querySelectorAll('.ray');
+  var cap = document.getElementById('rayCap');
+  Array.prototype.forEach.call(rays, function (r) {
+    var show = function () {
+      Array.prototype.forEach.call(rays, function (x) { x.classList.toggle('on', x === r); });
+      var d = r.getAttribute('data-d');
+      if (cap && DIMS[d]) cap.innerHTML = '<b style="color:' + DIMS[d].color + '">' + esc(DIMS[d].name) + '</b>' + esc(DIMS[d].blurb);
+    };
+    r.addEventListener('mouseenter', show); r.addEventListener('focus', show); r.addEventListener('click', show);
+    r.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(); } });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('[data-count]'), function (n) {
+    var to = parseFloat(n.getAttribute('data-count')), suf = n.getAttribute('data-suf') || '';
+    if (reduce || isNaN(to)) { n.textContent = to + suf; return; }
+    var t0 = performance.now(), dur = 900;
+    (function tick(t) {
+      var k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      n.textContent = Math.round(to * e) + suf;
+      if (k < 1) requestAnimationFrame(tick);
+    })(t0);
+  });
+  var at = document.querySelector('.tab.active');
+  if (at && at.scrollIntoView && !/jsdom/i.test(navigator.userAgent)) { try { at.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {} }
+  onScrollTopbar();
+}
+function onScrollTopbar() {
+  var tb = document.querySelector('.topbar');
+  if (tb) tb.classList.toggle('scrolled', window.scrollY > 4);
+}
+window.addEventListener('scroll', onScrollTopbar, { passive: true });
+
+function topbar(title, backAct) {
+  return '<div class="topbar">' +
+    '<div class="row center" style="gap:10px">' +
+      (backAct ? '<button class="iconbtn" data-act="' + backAct + '" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>' : '') +
+      '<div class="wordmark">' + (title ? esc(title) : 'Psyche <span class="mono" style="font-weight:400;color:var(--faint);font-size:12px">Core</span>') + '</div>' +
+    '</div>' +
+    '<div class="row center" style="gap:8px">' +
+    (AUTH.enabled
+      ? '<button class="iconbtn' + (state.user ? ' signedin' : '') + '" data-act="account" aria-label="' + (state.user ? 'Account' : 'Sign in') + '"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg></button>'
+      : '') +
+    '<button class="iconbtn" data-act="toggletheme" aria-label="' + (state.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme') + '">' +
+      (state.theme === 'dark'
+        ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>'
+        : '<svg viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>') +
+    '</button></div></div>';
+}
+
+/* ---------------- HOME (doubles as the full app overview \u2014 first thing anyone sees) ---------------- */
+function prismHero() {
+  var order = DIM_ORDER;
+  var rays = order.map(function (d, i) {
+    var t = 0.34 + i * 0.08, sx = (150 + 54 * t).toFixed(1), sy = (36 + 114 * t).toFixed(1), ey = 30 + i * 48;
+    return '<g class="ray" data-d="' + d + '" tabindex="0" role="button" aria-label="' + esc(DIMS[d].name) + ': ' + esc(DIMS[d].blurb) + '" style="--i:' + i + '">' +
+      '<path class="rl" d="M' + sx + ',' + sy + ' L338,' + ey + '" stroke="' + DIMS[d].color + '" style="--i:' + i + ';--len:260"/>' +
+      '<text x="334" y="' + (ey - 12) + '" text-anchor="end">' + esc(DIMS[d].name) + '</text></g>';
+  }).join('');
+  return '<div class="prism"><svg viewBox="0 0 360 250" role="group" aria-label="A beam of light enters a prism and splits into five coloured rays, one per dimension. Each ray is a button that shows what that dimension measures.">' +
+    '<path class="beam" d="M-10,108 L123,93" style="--len:150"/>' +
+    '<polygon class="glass" points="150,36 96,150 204,150"/>' + rays + '</svg></div>' +
+    '<p id="rayCap" class="sub raycap" aria-live="polite"><b>Five dimensions, one profile.</b>Tap a ray to see what each one measures.</p>';
+}
+
+function startButtonsHTML() {
+  var draft = readDraft(), hasResult = !!state.result, h = '';
+  if (draft) {
+    h += '<button class="btn primary block mt18" data-act="resume">Resume your assessment (' + draft.answered + ' of ' + QUESTIONS.length + ' answered)</button>' +
+         '<button class="btn ghost block mt10" data-act="start">Start over (discards saved progress)</button>';
+  } else h += '<button class="btn primary block mt18" data-act="start">' + (hasResult ? 'Retake the PRISM test' : 'Take the PRISM test') + '</button>';
+  if (hasResult) h += '<button class="btn ghost block mt10" data-act="goresults">See your last result</button>';
+  return h;
+}
+function expectCardHTML() {
+  var I = PsycheUX.INTRO;
+  return '<section class="card mt18" aria-labelledby="expectH"><h2 id="expectH" style="font-size:16px">Before you start</h2>' +
+    '<ul class="plainlist"><li>' + esc(I.time) + '</li><li>' + esc(I.privacy) + '</li><li>' + esc(I.boundary) + '</li></ul>' +
+    '<p class="mt8" style="font-size:13.5px"><button type="button" class="linkbtn inline" data-act="intro">More about what to expect</button></p></section>';
+}
+
+function viewHome() {
+  var hasResult = !!state.result;
+
+  var tile = function (o) {
+    return '<button class="tile' + (o.wide ? ' wide' : '') + '" style="--tc:' + o.c + '" data-act="' + o.act + '"' + (o.sciTab ? ' data-sci="' + o.sciTab + '"' : '') + '>' +
+      '<h3>' + esc(o.title) + '</h3><p>' + o.body + '</p><span class="go">' + esc(o.label) + '</span></button>';
+  };
+
+  var sampleKeys = ['PRISM', 'PURE_M', 'PI', 'RS', 'IS', 'PURE_S'];
+  var archSample = sampleKeys.map(function (key) {
+    var arche = archeByKey(key), meta = archeMeta(key);
+    var color = meta.lead ? DIMS[meta.lead].color : 'var(--accent)';
+    return '<div class="archcard" data-act="archopen" data-key="' + key + '" role="button" tabindex="0" style="border-top:3px solid ' + color + '">' +
+      '<span class="em">' + archEmoji(key) + '</span><b>' + esc(arche.name) + '</b><p>' + esc(arche.tag) + '</p></div>';
+  }).join('') +
+  '<div class="archcard" data-act="archlib" role="button" tabindex="0" style="display:flex;align-items:center;justify-content:center;text-align:center"><b>See all 36 →</b></div>';
+
+  var sciChips = [['model', 'The model'], ['items', 'Item design'], ['scoring', 'Scoring'], ['quality', 'Response quality'], ['archetype', 'Archetypes'], ['compat', 'Compatibility math'], ['limits', 'Limitations']]
+    .map(function (t) { return '<button type="button" class="pill" data-act="science" data-sci="' + t[0] + '">' + esc(t[1]) + '</button>'; }).join('');
+
+  return topbar() +
+    '<div class="wrap">' +
+      '<div class="hero">' +
+        '<h1>A personality instrument, not a personality quiz.</h1>' +
+        prismHero().replace('class="prism"', 'class="prism prism-anim"') +
+        '<p class="sub">40 questions, five dimensions, 36 archetypes. Every result is built from your actual answers, not picked from a template.</p>' +
+        '<div class="factrow">' +
+          '<div class="fact"><b data-count="5">5</b><span>Dimensions</span></div>' +
+          '<div class="fact"><b data-count="20">20</b><span>Facets</span></div>' +
+          '<div class="fact"><b data-count="36">36</b><span>Archetypes</span></div>' +
+          '<div class="fact"><b>5\u20138</b><span>Minutes (estimate)</span></div>' +
+        '</div>' +
+        startButtonsHTML() + expectCardHTML() +
+        (AUTH.enabled && !state.user ? '<p class="sub mt12" style="font-size:13.5px;text-align:center"><button class="linkbtn" style="padding:0;font-weight:650;color:var(--ink)" data-act="account">Sign in or create an account</button> to keep your result across devices.</p>' : '') +
+      '</div>' +
+
+      '<h2 class="section-h">Archetypes you could be</h2>' +
+      '<p class="sub mt6">Browse all 36 without testing. Each gets the same full analysis as a real result.</p>' +
+      '<div class="archscroll">' + archSample + '</div>' +
+
+      '<h2 class="section-h">What you can do</h2>' +
+      '<div class="tiles">' +
+        tile({ c: 'var(--R)', title: 'Profile, facets and deep analysis', body: 'Five scores, twenty facets and nine written sections generated from your answers.', label: hasResult ? 'See your result' : 'Take the test first', act: hasResult ? 'goresults' : 'start' }) +
+        tile({ c: 'var(--S)', title: 'Compare with someone', body: 'Connect by email or share link and get a trait-by-trait compatibility read.', label: 'Compare', act: (AUTH.enabled || hasResult) ? 'compare' : 'start' }) +
+        tile({ c: 'var(--M)', title: 'Compare a group or team', body: 'Invite people by email for a team profile, pairing matrix and natural roles.', label: 'Open groups', act: (AUTH.enabled || hasResult) ? 'group' : 'start' }) +
+        tile({ c: 'var(--P)', title: 'How the numbers work', body: 'Scoring formula, response quality, archetype rules and honest limitations.', label: 'Read the science', act: 'science' }) +
+      '</div>' +
+      '<div class="pill-row mt14">' + sciChips + '</div>' +
+      '<div class="tiles"><button class="tile wide" style="--tc:var(--I)" data-act="glossary"><h3>Glossary</h3><p>Every comparison and group term, defined once.</p><span class="go">Open the glossary</span></button></div>' +
+
+      '<h2 class="section-h">Made by</h2>' +
+      '<div class="card mt14"><div class="row center" style="gap:14px">' +
+        '<div style="position:relative;width:64px;height:64px;flex:none">' +
+          '<div style="position:absolute;inset:0;border-radius:50%;background:var(--ink);color:var(--bg);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:22px">A</div>' +
+          '<img src="profile.jpg" alt="Aryan" width="64" height="64" style="position:absolute;inset:0;width:64px;height:64px;border-radius:50%;object-fit:cover" data-hide-on-error="1">' +
+        '</div>' +
+        '<div><b style="font-size:17px">Aryan</b><div class="mono" style="font-size:13px;color:var(--faint);margin-top:2px">Roll no. 24EBKEC010</div></div>' +
+      '</div></div>' +
+
+      startButtonsHTML().replace('mt18', 'mt24') +
+      '<footer class="privacy">' +
+        (AUTH.enabled
+          ? 'Your answers are scored in this browser. Without an account nothing leaves this device \u2014 your result lives in local storage until you clear it or retake the assessment. If you choose to sign in, only your computed result (scores, facets, archetype) is saved to your private account so it follows you across devices; only you can read it. If you connect with someone or join a group, your display name, dimension and facet scores and archetype become visible to them \u2014 and only them. Sign out any time.'
+          : 'Nothing you answer leaves this device. There\u2019s no account, no login, no server this sends data to \u2014 your result lives in this browser\u2019s local storage until you clear it or retake the assessment. Refreshing the page will not lose your result; a private/incognito window will.') +
+      '<br><a href="privacy.html" style="color:inherit">Privacy Policy</a> \u00b7 <a href="terms.html" style="color:inherit">Terms of Service</a></footer>' +
+    
+    '</div>';
+}
+
+/* ---------------- ASSESSMENT ---------------- */
+var LIKERT = [
+  { v: 1, l: 'Strongly disagree' },
+  { v: 2, l: 'Disagree' },
+  { v: 3, l: 'Neutral' },
+  { v: 4, l: 'Agree' },
+  { v: 5, l: 'Strongly agree' }
+];
+
+function viewIntro() {
+  var I = PsycheUX.INTRO, draft = readDraft();
+  var item = function (h, t) { return '<div class="introitem"><h2>' + esc(h) + '</h2><p class="sub">' + esc(t) + '</p></div>'; };
+  return topbar('Before you start', 'home') +
+    '<div class="wrap" style="padding-top:8px">' +
+      '<div class="hero" style="padding-top:20px"><h1 style="font-size:clamp(28px,7vw,38px)" tabindex="-1">Before you start</h1><p class="sub">' + esc(I.purpose) + '</p></div>' +
+      '<div class="mt18">' +
+        item('How long it takes', I.time) + item('How your answers are used', I.use) + item('Privacy', I.privacy) + item('What it is not', I.boundary) +
+      '</div>' +
+      '<p class="sub mt14" style="font-size:13.5px">Answer by how true each statement feels for you in general, not how you would like it to be. There are no right answers.</p>' +
+      (draft ? '<button class="btn primary block mt18" data-act="resume">Resume your assessment (' + draft.answered + ' of ' + QUESTIONS.length + ' answered)</button><button class="btn ghost block mt10" data-act="begin">Start over</button>'
+             : '<button class="btn primary block mt18" data-act="begin">Begin the assessment</button>') +
+      '<p class="sub mt14" style="font-size:13.5px;text-align:center"><a href="privacy.html" style="color:inherit">Read the privacy policy</a> · <a href="terms.html" style="color:inherit">Terms</a></p>' +
+    '</div>';
+}
+
+function viewAssessment() {
+  var i = state.qIndex, q = QUESTIONS[i], total = QUESTIONS.length, answered = answeredCount();
+  var dim = q.f.charAt(0), col = DIMS[dim].color;
+  var segs = QUESTIONS.map(function (x, k) {
+    return '<i class="seg' + (k < i ? ' done' : (k === i ? ' now' : '')) + '" style="--c:' + DIMS[x.f.charAt(0)].color + '"></i>';
+  }).join('');
+  var dir = state.qDir || '';
+  return topbar(null, 'home') +
+    '<div class="wrap qwrap">' +
+      '<div>' +
+        '<div class="row between"><span class="eb mono">Question ' + (i + 1) + ' of ' + total + '</span><span class="eb mono">' + answered + ' answered</span></div>' +
+        '<div class="segs" role="progressbar" aria-label="Assessment progress" aria-valuemin="1" aria-valuemax="' + total + '" aria-valuenow="' + (i + 1) + '" aria-valuetext="Question ' + (i + 1) + ' of ' + total + ', ' + answered + ' answered">' + segs + '</div>' +
+        (state.fromReview ? '<p class="sub mt10" style="font-size:13.5px"><b>Answering a skipped question.</b> After this you will return to the review.</p>' : '') +
+        '<div class="qbody ' + dir + '" style="--qc:' + col + '">' +
+          '<div class="qdim" style="color:' + col + '"><span class="pdot" style="background:' + col + '" aria-hidden="true"></span>' + esc(DIMS[dim].name) + '</div>' +
+          '<h1 class="qtext" id="qtext" tabindex="-1"><span class="sr-only">Question ' + (i + 1) + ' of ' + total + '. </span>' + esc(q.t) + '</h1>' +
+          '<div class="likert" role="group" aria-labelledby="qtext">' +
+            LIKERT.map(function (o) {
+              var checked = state.answers[i] === o.v;
+              return '<button type="button" class="likertbtn' + (checked ? ' sel' : '') + '" data-act="answer" data-v="' + o.v + '" aria-pressed="' + (checked ? 'true' : 'false') + '">' +
+                '<span class="num" aria-hidden="true">' + o.v + '</span>' + esc(o.l) + '</button>';
+            }).join('') +
+          '</div>' +
+          '<p class="kbhint eb mt10">Keyboard: press 1 to 5 to answer.</p>' +
+          '<div class="qnav">' +
+            (i > 0 || state.fromReview ? '<button type="button" class="linkbtn" data-act="prevq">← Back</button>' : '<span></span>') +
+            '<button type="button" class="linkbtn" data-act="skipq">Skip →</button>' +
+          '</div>' +
+          '<p class="sub mt10" style="font-size:13px">Your progress is saved on this device. You can leave and resume later.</p>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+function viewReview() {
+  var sk = skippedList(), n = sk.length;
+  var list = sk.map(function (k) {
+    return '<li><button type="button" class="reviewitem" data-act="gotoq" data-i="' + k + '"><span class="mono">Question ' + (k + 1) + '</span><span>' + esc(QUESTIONS[k].t) + '</span></button></li>';
+  }).join('');
+  return topbar('Review', 'home') +
+    '<div class="wrap" style="padding-top:8px">' +
+      '<div class="hero" style="padding-top:20px"><h1 style="font-size:clamp(26px,7vw,34px)" tabindex="-1">' + (n === 1 ? 'One question was skipped' : n + ' questions were skipped') + '</h1>' +
+      '<p class="sub mt10">Skipped questions are counted as neutral, which makes your scores less reliable. Answer them now, or see your result as it is. Your result will say it is incomplete.</p></div>' +
+      '<ul class="reviewlist mt14">' + list + '</ul>' +
+      '<button class="btn primary block mt18" data-act="finishforce">See my result anyway</button>' +
+      '<button class="btn ghost block mt10" data-act="home">Save and finish later</button>' +
+    '</div>';
+}
+
+var answerLock = false;
+function answerCurrent(v, btn) {
+  if (answerLock) return;
+  state.answers[state.qIndex] = v;
+  saveDraft();
+  var instant = !btn || /jsdom/i.test(navigator.userAgent) || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  if (instant) { advanceQuestion(); return; }
+  answerLock = true;
+  Array.prototype.forEach.call(document.querySelectorAll('.likertbtn'), function (b) { b.classList.toggle('sel', b === btn); b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'); });
+  setTimeout(function () { answerLock = false; advanceQuestion(); }, 190);
+}
+function advanceQuestion() {
+  state.qDir = 'fwd';
+  state.focus = 'question';
+  if (state.fromReview) {
+    state.fromReview = false; saveDraft();
+    if (skippedList().length) { state.screen = 'review'; render(); } else finishAssessment();
+    return;
+  }
+  if (state.qIndex + 1 >= QUESTIONS.length) {
+    saveDraft();
+    if (skippedList().length) { state.screen = 'review'; render(); } else finishAssessment();
+    return;
+  }
+  state.qIndex++;
+  saveDraft();
+  render();
+}
+function startAssessment() {
+  PsycheUX.clearDraft(ls());
+  state.screen = 'assessment'; state.qIndex = 0; state.qDir = ''; state.answers = []; state.fromReview = false; state.focus = 'question';
+  render();
+}
+function resumeAssessment() {
+  var d = readDraft();
+  if (!d) return startAssessment();
+  state.answers = d.answers.slice(); state.qIndex = d.qIndex; state.qDir = ''; state.fromReview = false; state.screen = 'assessment'; state.focus = 'question';
+  render();
+}
+function finishAssessment() {
+  state.result = computeResult(state.answers);
+  state.resultAt = Date.now();
+  state.resultOwner = undefined;   // a brand-new result; pushResult() binds it to the signed-in account, if any
+  state.screen = 'results';
+  state.resultsTab = 'profile';
+  state.fromReview = false;
+  PsycheUX.clearDraft(ls());
+  persist();
+  render();
+  pushResult();
+}
+
+/* ---------------- AUTH + CLOUD SYNC ---------------- */
+/* individual answers stay on this device — never uploaded */
+function withoutAnswers(r) { var c = Object.assign({}, r); delete c.ans; return c; }
+
+function pushResult(force) {
+  if (!AUTH.enabled || !state.user || !state.result) return Promise.resolve();
+  if (state.syncPaused && force !== true) { state.syncStatus = 'paused'; return Promise.resolve(); }
+  if (force === true && state.syncPaused) state.syncPaused = false;
+  if (state.resultOwner !== state.user.id) { state.resultOwner = state.user.id; }
+  persist();
+  if (state.offline) { state.syncStatus = 'offline'; if (state.screen === 'account') render(); return Promise.resolve(); }   /* retried automatically on the 'online' event */
+  state.syncStatus = 'saving';
+  /* Phase 6: duplicate/rapid saves are coalesced into at most one in-flight + one trailing request, and transient failures are
+     retried with backoff. The write is an upsert keyed by user_id, so a replay can only write the same row again (idempotent). */
+  var run = function () {
+    var uid = state.user && state.user.id;
+    if (!uid || !state.result || state.resultOwner !== uid) return Promise.resolve({ error: null });   /* signed out / switched account mid-retry: never upload */
+    return PsycheOps.retry(function () { return AUTH.saveResult(uid, withoutAnswers(state.result), state.resultAt); },
+      { tries: 3, baseMs: 700, jitter: function () { return Math.floor(Math.random() * 250); }, canRetry: function () { return !state.offline && !!state.user && state.user.id === uid; } });
+  };
+  return PsycheOps.sync('push-result', run).then(function (r) {
+    state.syncStatus = r && r.error ? 'error' : 'saved';
+    if (r && r.error) PsycheOps.report('sync', { code: r.transient ? 'push_transient' : 'push_failed' });
+    if (state.screen === 'account') render();
+    return pushProfile();
+  });
+}
+
+// After sign-in / page load with a session: reconcile the local and cloud copies (newest wins).
+function syncAfterLogin() {
+  if (!AUTH.enabled || !state.user) return Promise.resolve();
+  // A result that was last synced for a DIFFERENT account must never be uploaded into this one (shared device / account switching).
+  if (PsychePrivacy.ownedByOther(state.resultOwner, state.user.id)) {
+    PsychePrivacy.wipeLocal(ls());
+    state.result = null; state.resultAt = 0; state.resultOwner = undefined; state.syncPaused = false;
+    persist();
+    state.notice = 'A result from a different account was still on this device. It was removed here and was not uploaded to your account.';
+  }
+  state.syncStatus = 'saving';
+  return AUTH.loadResult().then(function (r) {
+    if (r.error) { state.syncStatus = 'error'; return; }
+    var localAt = state.resultAt || 0;
+    var cloud = r.result ? ProfileSchema.validate(r.result) : null;
+    if (cloud && !cloud.ok) {
+      // an unreadable cloud copy must never replace anything; a valid local copy then overwrites it
+      state.syncStatus = 'error'; state.syncNote = 'The saved cloud result could not be read, so it was ignored.';
+      if (state.result) return pushResult();
+      return;
+    }
+    if (cloud && (!state.result || r.at > localAt)) {
+      state.result = cloud.value; state.resultAt = r.at; state.resultOwner = state.user.id; persist();
+      state.syncStatus = 'saved'; state.syncNote = null;
+    } else if (state.result) {
+      if (!state.resultAt) { state.resultAt = Date.now(); persist(); }
+      return pushResult();
+    } else { state.syncStatus = 'saved'; }
+  });
+}
+
+function onAuthEvent(event, user) {
+  var wasIn = !!state.user;
+  state.user = user;
+  if (event === 'PASSWORD_RECOVERY') { state.screen = 'recovery'; state.authError = null; state.authNotice = null; render(); return; }
+  if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') return;
+  if (event === 'SIGNED_OUT') {
+    resetSocial();
+    if (state.screen === 'account' || state.screen === 'compare' || state.screen === 'group') state.screen = 'home';
+    if (state.screen !== 'assessment') render();
+    return;
+  }
+  var urlErr = event === 'INITIAL' && !user ? AUTH.urlError() : null;
+  if (urlErr) { state.screen = 'auth'; state.authMode = 'signin'; state.authError = urlErr + ' Request a new link below.'; render(); return; }
+  if (!user && event === 'INITIAL' && readPendingJoin()) {
+    state.screen = 'auth'; state.authMode = 'signin';
+    state.authNotice = 'Sign in (or create an account) to accept the invitation to connect.'; render(); return;
+  }
+  if (user && (!wasIn || event === 'INITIAL')) {
+    syncAfterLogin().then(setupSocial).then(function () {
+      if (state.screen === 'auth') state.screen = state.result ? 'results' : 'home';
+      if (state.screen !== 'assessment') render();
+    });
+  } else if (state.screen !== 'assessment') render();
+}
+
+
+/* ---------------- ACCOUNT-BASED COMPARE + GROUPS ---------------- */
+var PENDING_JOIN_KEY = 'psyche_pending_join_v1';
+function siteUrl() { return window.location.origin + window.location.pathname; }
+function readPendingJoin() { try { return localStorage.getItem(PENDING_JOIN_KEY); } catch (e) { return null; } }
+function writePendingJoin(t) { try { if (t) localStorage.setItem(PENDING_JOIN_KEY, t); else localStorage.removeItem(PENDING_JOIN_KEY); } catch (e) {} }
+// A share link looks like  https://site/?join=<token>. Remember the token (it must survive the sign-in redirect) and tidy the URL.
+function captureJoinParam() {
+  try {
+    var p = new URLSearchParams(window.location.search), t = p.get('join');
+    if (!t) return;
+    if (/^[A-Za-z0-9]{16,128}$/.test(t)) writePendingJoin(t);
+    p.delete('join');
+    var q = p.toString();
+    window.history.replaceState(null, '', window.location.pathname + (q ? '?' + q : '') + window.location.hash);
+  } catch (e) {}
+}
+function defaultName(u) {
+  var m = (u && u.user_metadata) || {};
+  var n = m.full_name || m.name || (u && u.email ? u.email.split('@')[0] : '');
+  return String(n).trim().slice(0, 40) || 'Me';
+}
+function myName() { return state.displayName || (state.user ? defaultName(state.user) : 'You'); }
+function userEmail() { return state.user && state.user.email ? String(state.user.email).toLowerCase() : ''; }
+function validDims(d) {
+  if (!d || typeof d !== 'object') return false;
+  return DIM_ORDER.every(function (k) { return typeof d[k] === 'number' && d[k] >= 0 && d[k] <= 100; });
+}
+function personOf(p, fallbackName) {
+  if (!p || !validDims(p.dims)) return null;
+  return { name: p.display_name || fallbackName || 'Someone', dims: p.dims, key: p.arch_key, facets: EnginePlus.validFacets(p.facets) ? p.facets : null };
+}
+function uniqueName(name, taken) {
+  var base = name, n = 2;
+  while (taken.indexOf(name) >= 0) { name = base + ' (' + n + ')'; n++; }
+  return name;
+}
+function setSocialMsg(err, ok) { state.socialMsg = err ? { err: err } : ok ? { ok: ok } : null; }
+function resetSocial() {
+  state.social = { loaded: false, connections: [], groups: [], members: [], profiles: {} };
+  state.socialMsg = null; state.socialBusy = false; state.displayName = ''; state.nameReady = false;
+  state.compareWith = null; state.activeGroup = null;
+  state.delOpen = false; state.delBusy = false; state.delError = null;
+}
+
+function refreshSocial() {
+  if (!AUTH.enabled || !state.user) return Promise.resolve();
+  return AUTH.loadSocial().then(function (r) {
+    if (r.error) setSocialMsg(r.error);
+    else state.social = { loaded: true, connections: r.connections, groups: r.groups, members: r.members, profiles: r.profiles };
+    if (state.screen === 'compare' || state.screen === 'group' || (state.screen === 'account' && !state.delOpen)) render();
+  });
+}
+// Publish my display name + scores so accepted connections / group members can read them (and only them).
+function pushProfile() {
+  if (!AUTH.enabled || !state.user || !state.nameReady) return Promise.resolve();
+  return AUTH.saveProfile(state.user.id, state.user.email, myName(), state.syncPaused ? null : state.result).then(function (r) {
+    if (r.error) setSocialMsg(r.error);
+  });
+}
+function joinPending() {
+  var t = readPendingJoin();
+  if (!t) return Promise.resolve();
+  writePendingJoin(null);
+  if (!window.confirm('Connect with the person who sent you this link?\n\nOnce connected you can each see the other’s dimension and facet scores and archetype (never your answers). You can remove the connection any time.')) return Promise.resolve();
+  return AUTH.acceptLink(t).then(function (r) {
+    if (r.error) setSocialMsg(r.error); else setSocialMsg(null, 'Connected! Tap “Compare” next to their name below.');
+    state.screen = 'compare';
+  });
+}
+// After sign-in: load my display name, publish my profile, accept a pending share link, load connections + groups.
+function setupSocial() {
+  if (!AUTH.enabled || !state.user) return Promise.resolve();
+  return AUTH.loadProfile(state.user.id).then(function (r) {
+    state.displayName = (r && r.name) || defaultName(state.user);
+    state.nameReady = true;
+    return pushProfile();
+  }).then(joinPending).then(refreshSocial);
+}
+function doSocial(promise, okMsg, after) {
+  state.socialBusy = true; setSocialMsg(null); render();
+  promise.then(function (r) {
+    if (r.error) setSocialMsg(r.error);
+    else { setSocialMsg(null, okMsg); if (after) after(r); }
+    return refreshSocial();
+  }).then(function () { state.socialBusy = false; render(); });
+}
+
+function connectionLists() {
+  var uid = state.user.id, em = userEmail();
+  var out = { accepted: [], received: [], sent: [] };
+  state.social.connections.forEach(function (c) {
+    if (c.status === 'accepted') {
+      var otherId = c.requester_id === uid ? c.addressee_id : c.requester_id;
+      var p = state.social.profiles[otherId];
+      out.accepted.push({ id: c.id, name: (p && p.display_name) || (c.requester_id === uid ? (c.invitee_email || 'Connection') : c.requester_name), person: personOf(p) });
+    } else if (c.requester_id === uid) out.sent.push(c);
+    else if (String(c.invitee_email || '').toLowerCase() === em) out.received.push(c);
+  });
+  return out;
+}
+function currentCompareThem() {
+  if (!state.user || !state.compareWith) return null;
+  var hit = connectionLists().accepted.filter(function (a) { return a.id === state.compareWith; })[0];
+  if (!hit || !hit.person) return null;
+  return { name: uniqueName(hit.person.name, [myName()]), dims: hit.person.dims, key: hit.person.key, facets: hit.person.facets };
+}
+function groupPeople(gid) {
+  var out = [], taken = [];
+  state.social.members.filter(function (m) { return m.group_id === gid && m.status === 'accepted'; }).forEach(function (m) {
+    var isMe = m.user_id === state.user.id;
+    var per = isMe && state.result
+      ? { name: myName(), dims: state.result.dims, key: state.result.match.key, facets: state.result.facets }
+      : personOf(state.social.profiles[m.user_id], String(m.email).split('@')[0]);
+    if (!per) return;
+    per.name = uniqueName(per.name, taken); taken.push(per.name);
+    out.push(per);
+  });
+  return out;
+}
+function socialGate() {
+  if (!AUTH.enabled) return '<div class="card mt14"><div class="eb">Accounts not enabled</div><p class="sub mt8" style="font-size:12.5px">Comparing with other people works through accounts. This copy of Psyche Core has no Supabase project configured (see README), so it runs in offline, single-person mode.</p></div>';
+  if (!state.user) return '<div class="card mt14"><div class="eb">Sign in to continue</div><p class="sub mt8" style="font-size:12.5px">Comparing works through accounts: you and the other person each sign in (Google or email), connect by invitation, and nobody sees anyone’s scores until they accept.</p><button class="btn primary block mt12" data-act="account">Sign in / create account</button></div>';
+  return '';
+}
+function socialMsgBox() {
+  var m = state.socialMsg;
+  return m ? '<div class="msg ' + (m.err ? 'err' : 'ok') + '" role="' + (m.err ? 'alert' : 'status') + '" style="margin-top:14px">' + esc(m.err || m.ok) + '</div>' : '';
+}
+
+function authShell(title, body) {
+  return topbar(title, 'home') + '<div class="wrap" style="padding-top:8px">' + body + '</div>';
+}
+function msgBox() {
+  return (state.authError ? '<div class="msg err" role="alert">' + esc(state.authError) + '</div>' : '') +
+         (state.authNotice ? '<div class="msg ok" role="status">' + esc(state.authNotice) + '</div>' : '');
+}
+function viewAuth() {
+  var m = state.authMode, busy = state.authBusy ? ' disabled' : '';
+  var titles = { signin: 'Welcome back', signup: 'Create your account', forgot: 'Reset your password' };
+  var subs = {
+    signin: 'Sign in to load your saved result on this device.',
+    signup: 'Free. Save your result and open it from any device. Only your computed scores are stored — never your individual answers.',
+    forgot: 'Enter your email and we’ll send a link to choose a new password.'
+  };
+  var labels = { signin: 'Sign in', signup: 'Create account', forgot: 'Send reset link' };
+  return authShell('Account',
+    '<div class="hero" style="padding-top:24px"><h1 style="font-size:28px">' + titles[m] + '</h1><p class="sub">' + subs[m] + '</p></div>' +
+    (m !== 'forgot' ? '<button class="btn ghost block mt18" data-act="google"' + busy + '><svg viewBox="0 0 24 24" width="18" height="18" style="vertical-align:-3px;margin-right:8px"><path fill="#4285F4" d="M22.5 12.2c0-.8-.1-1.5-.2-2.2H12v4.2h5.9c-.3 1.4-1 2.5-2.2 3.3v2.7h3.5c2.1-1.9 3.3-4.7 3.3-8z"/><path fill="#34A853" d="M12 23c3 0 5.4-1 7.2-2.7l-3.5-2.7c-1 .7-2.2 1-3.7 1-2.9 0-5.3-1.9-6.1-4.5H2.3v2.8C4.1 20.5 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.9 14.1c-.2-.7-.4-1.400-.4-2.100s.1-1.400.4-2.100V7.100H2.300C1.500 8.600 1 10.200 1 12s.5 3.400 1.300 4.900l3.600-2.800z"/><path fill="#EA4335" d="M12 5.400c1.600 0 3.100.6 4.200 1.600l3.100-3.100C17.400 2.200 15 1 12 1 7.700 1 4.100 3.500 2.300 7.100l3.600 2.800C6.700 7.300 9.100 5.400 12 5.400z"/></svg>Continue with Google</button><div class="eb mt14" style="text-align:center">or use email</div>' : '') +
+    '<form id="authForm" class="mt14" novalidate>' +
+      '<label class="field"><span>Email</span><input class="input" id="authEmail" type="email" autocomplete="email" inputmode="email" required value="' + esc(state.authEmail) + '"></label>' +
+      (m !== 'forgot' ? '<label class="field"><span>Password' + (m === 'signup' ? ' (at least 8 characters)' : '') + '</span><input class="input" id="authPass" type="password" autocomplete="' + (m === 'signup' ? 'new-password' : 'current-password') + '" minlength="8" required></label>' : '') +
+      msgBox() +
+      '<button class="btn primary block mt18" type="submit"' + busy + '>' + (state.authBusy ? 'Please wait…' : labels[m]) + '</button>' +
+    '</form>' +
+    '<div class="row mt14" style="justify-content:center;gap:6px;flex-wrap:wrap">' +
+      (m === 'signin' ? '<button class="linkbtn" data-act="authmode" data-mode="signup">Create an account</button><button class="linkbtn" data-act="authmode" data-mode="forgot">Forgot password?</button>' : '') +
+      (m !== 'signin' ? '<button class="linkbtn" data-act="authmode" data-mode="signin">← Back to sign in</button>' : '') +
+    '</div>' +
+    '<footer class="privacy">You can keep using Psyche Core without an account — everything works offline in this browser.</footer>');
+}
+
+function deleteAccountCard() {
+  var uid = state.user ? state.user.id : null, S = state.social, busy = state.delBusy ? ' disabled' : '';
+  var head = '<b style="font-size:14px;color:var(--S)">Delete account</b>' +
+    '<p class="sub mt6" style="font-size:12px;color:var(--faint)">Permanently delete your account and everything stored in it. This cannot be undone.</p>';
+  if (!state.delOpen) return '<div class="card mt24" style="border-color:rgba(190,18,60,.35)">' + head +
+    '<button class="btn ghost block mt12" data-act="delopen" style="color:var(--S)">Delete my account…</button></div>';
+  var owned = S.groups.filter(function (g) { return g.owner_id === uid; });
+  var joined = S.members.filter(function (m) { return m.user_id === uid && m.status === 'accepted'; }).length - owned.length;
+  var conns = S.connections.filter(function (c) { return c.status === 'accepted'; }).length;
+  var li = function (t) { return '<li style="margin-top:4px">' + t + '</li>'; };
+  return '<form id="delForm" class="card mt24" style="border-color:rgba(190,18,60,.5)" novalidate>' + head +
+    '<p class="sub mt10" style="font-size:12.5px"><b>This will permanently delete:</b></p>' +
+    '<ul class="sub" style="font-size:12.5px;margin:6px 0 0;padding-left:18px">' +
+      li('your login (' + esc(state.user.email) + ') — you will need to sign up again to use an account') +
+      li('your saved result and your shared profile (name, scores, archetype)') +
+      (S.loaded ? li(conns + ' connection' + (conns === 1 ? '' : 's') + ' — those people immediately lose access to your scores') : li('all your connections — those people immediately lose access to your scores')) +
+      (S.loaded ? li('your membership in ' + Math.max(0, joined) + ' group' + (joined === 1 ? '' : 's') + ' you joined') : li('your membership in groups you joined')) +
+      li('any pending invitations to or from you') +
+    '</ul>' +
+    (owned.length ? '<div class="msg err" style="margin-top:12px"><b>Groups you created will be deleted for everyone in them:</b> ' + esc(owned.map(function (g) { return g.name; }).join(', ')) + '.</div>' : '') +
+    '<label class="row mt14" style="gap:8px;align-items:flex-start;font-size:12.5px"><input type="checkbox" id="delLocal" checked style="margin-top:3px"><span>Also remove everything this app stored on this device: result, answers, saved progress, notes and ratings (otherwise they stay in this browser)</span></label>' +
+    '<label class="field"><span>Type <b>DELETE</b> to confirm</span><input class="input" id="delConfirm" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>' +
+    (state.delError ? '<div class="msg err" role="alert">' + esc(state.delError) + '</div>' : '') +
+    '<div class="row mt14" style="gap:10px;flex-wrap:wrap">' +
+      '<button class="btn block" type="submit" style="background:var(--S);color:#fff;flex:1"' + busy + '>' + (state.delBusy ? 'Deleting…' : 'Permanently delete my account') + '</button>' +
+      '<button class="btn ghost block" type="button" data-act="delcancel" style="flex:1"' + busy + '>Cancel</button>' +
+    '</div></form>';
+}
+
+function viewAccount() {
+  var u = state.user;
+  var status = { paused: 'Saving to your account is paused because you deleted your saved copy. Choose “Sync now” to save this result again.', saving: 'Syncing…', saved: 'Your result is saved to your account.', offline: 'You’re offline — your result is safe on this device and will sync automatically when you’re back online.', error: 'Couldn’t sync just now — your result is still safe on this device. It retries automatically when you’re back online, or when you finish the test again.' }[state.syncStatus] || '';
+  return authShell('Account',
+    '<div class="hero" style="padding-top:24px"><h1 style="font-size:28px">Your account</h1>' +
+      '<p class="sub mono" style="font-size:13px;word-break:break-all">' + esc(u ? u.email : '') + '</p></div>' +
+    '<div class="card mt18"><b style="font-size:14px">Saved result</b>' +
+      '<p class="sub mt6" style="font-size:13px">' + (state.result ? esc((state.result.match.arche && archEmoji(state.result.match.key) + ' ' + state.result.match.arche.name) || state.result.match.key || 'Result saved') : 'No result yet — take the test and it will be saved here.') + '</p>' +
+      (status ? '<p class="sub mt6" style="font-size:12px;color:var(--faint)">' + esc(status) + '</p>' : '') +
+      (state.result ? '<button class="btn ghost block mt12" data-act="goresults">View result</button>' +
+        '<button class="linkbtn mt8" style="padding:0" data-act="syncnow">Sync now</button> · <button class="linkbtn mt8" style="padding:0" data-act="deletecloud">Delete my saved copy</button>' : '') +
+    '</div>' +
+    '<form id="nameForm" class="card mt14" novalidate><b style="font-size:14px">Display name</b>' +
+      '<p class="sub mt6" style="font-size:12px;color:var(--faint)">Shown to people you connect with in Compatibility and groups.</p>' +
+      '<label class="field"><span>Name</span><input class="input" id="displayNameInput" type="text" maxlength="40" autocomplete="nickname" value="' + esc(myName()) + '"></label>' +
+      '<button class="btn ghost block mt12" type="submit"' + (state.authBusy ? ' disabled' : '') + '>Save name</button></form>' +
+    '<form id="pwForm" class="card mt14" novalidate><b style="font-size:14px">Change password</b>' +
+      '<label class="field"><span>New password (at least 8 characters)</span><input class="input" id="newPass" type="password" autocomplete="new-password" minlength="8" required></label>' +
+      msgBox() +
+      '<button class="btn ghost block mt12" type="submit"' + (state.authBusy ? ' disabled' : '') + '>Update password</button></form>' +
+    '<div class="card mt14"><b style="font-size:14px">Data on this device</b>' +
+      '<p class="sub mt6" style="font-size:12.5px">Your result, answers, saved progress and notes are kept in this browser. Clearing them does not touch your account.</p>' +
+      '<button class="btn ghost block mt12" type="button" data-act="wipelocal">Clear data on this device</button></div>' +
+    '<button class="btn primary block mt24" data-act="signout"' + (state.authBusy ? ' disabled' : '') + '>Sign out</button>' +
+    deleteAccountCard());
+}
+function viewRecovery() {
+  return topbar('Reset password') + '<div class="wrap" style="padding-top:8px">' +
+    '<div class="hero" style="padding-top:24px"><h1 style="font-size:28px">Choose a new password</h1><p class="sub">You’re signed in via your reset link. Pick a new password to finish.</p></div>' +
+    '<form id="recoveryForm" class="mt14" novalidate>' +
+      '<label class="field"><span>New password (at least 8 characters)</span><input class="input" id="newPass" type="password" autocomplete="new-password" minlength="8" required></label>' +
+      msgBox() +
+      '<button class="btn primary block mt18" type="submit"' + (state.authBusy ? ' disabled' : '') + '>Save new password</button>' +
+    '</form></div>';
+}
+
+function authDone(patch) { state.authBusy = false; Object.assign(state, patch); render(); }
+function wireAuthForms() {
+  var f = document.getElementById('authForm');
+  if (f) f.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var email = document.getElementById('authEmail').value.trim();
+    var passEl = document.getElementById('authPass'), pass = passEl ? passEl.value : '';
+    state.authEmail = email; state.authError = null; state.authNotice = null;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return authDone({ authError: 'Enter a valid email address.' });
+    if (state.authMode !== 'forgot' && pass.length < 8) return authDone({ authError: 'Password must be at least 8 characters.' });
+    state.authBusy = true; render();
+    var mode = state.authMode;
+    var p = mode === 'signup' ? AUTH.signUp(email, pass) : mode === 'forgot' ? AUTH.sendReset(email) : AUTH.signIn(email, pass);
+    p.then(function (r) {
+      if (r.error) return authDone({ authError: r.error });
+      if (mode === 'signup' && r.needsConfirm) return authDone({ authMode: 'signin', authNotice: 'If this email can be used for a new account, a confirmation link is on its way to ' + email + '. Check your inbox (and spam), then sign in.' });
+      if (mode === 'forgot') return authDone({ authMode: 'signin', authNotice: 'If an account exists for ' + email + ', a reset link is on its way.' });
+      authDone({}); // signed in — onAuthEvent takes it from here
+    });
+  });
+  var df = document.getElementById('delForm');
+  if (df) df.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var typed = document.getElementById('delConfirm').value.trim();
+    var wipe = document.getElementById('delLocal').checked;
+    if (typed !== 'DELETE') { state.delError = 'Type DELETE (in capitals) to confirm.'; return render(); }
+    state.delError = null; state.delBusy = true; render();
+    AUTH.deleteAccount().then(function (r) {
+      if (r.error) { state.delBusy = false; state.delError = r.error; return render(); }
+      if (wipe) { PsychePrivacy.wipeLocal(ls(), { session: true }); state.result = null; state.resultAt = 0; state.answers = []; state.qIndex = 0; }
+      state.resultOwner = undefined; state.syncPaused = false; persist();
+      resetSocial(); state.user = null; state.syncStatus = null;
+      state.authMode = 'signin'; state.authError = null; state.authEmail = '';
+      state.authNotice = 'Your account and its data were permanently deleted.';
+      state.screen = 'auth'; render();
+    });
+  });
+  var nf = document.getElementById('nameForm');
+  if (nf) nf.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var v = document.getElementById('displayNameInput').value.trim().slice(0, 40);
+    state.authError = null; state.authNotice = null;
+    if (!v) return authDone({ authError: 'Please enter a name.' });
+    state.authBusy = true; render();
+    AUTH.saveProfile(state.user.id, state.user.email, v, state.syncPaused ? null : state.result).then(function (r) {
+      if (r.error) return authDone({ authError: r.error });
+      state.displayName = v; state.nameReady = true;
+      authDone({ authNotice: 'Name updated.' });
+    });
+  });
+  var pw = document.getElementById('pwForm'), rec = document.getElementById('recoveryForm');
+  [pw, rec].forEach(function (form) {
+    if (!form) return;
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = document.getElementById('newPass').value;
+      state.authError = null; state.authNotice = null;
+      if (v.length < 8) return authDone({ authError: 'Password must be at least 8 characters.' });
+      state.authBusy = true; render();
+      AUTH.updatePassword(v).then(function (r) {
+        if (r.error) return authDone({ authError: r.error });
+        authDone({ authNotice: 'Password updated.', screen: form === rec ? (state.result ? 'results' : 'home') : state.screen });
+      });
+    });
+  });
+}
+
+/* ---------------- RESULTS ---------------- */
+/* ---------------- ARCHETYPE LIBRARY ---------------- */
+var ARCH_KEYS = (function () {
+  var keys = ['PRISM'];
+  DIM_ORDER.forEach(function (d) { keys.push('PURE_' + d); });
+  var pairs = [['P','R'],['P','I'],['P','S'],['P','M'],['R','I'],['R','S'],['R','M'],['I','S'],['I','M'],['S','M']];
+  pairs.forEach(function (p) { keys.push('TWIN_' + p[0] + p[1]); });
+  DIM_ORDER.forEach(function (primary) {
+    DIM_ORDER.forEach(function (secondary) {
+      if (primary !== secondary) keys.push(primary + secondary);
+    });
+  });
+  return keys;
+})();
+
+function viewArchLibrary() {
+  var cards = ARCH_KEYS.map(function (key) {
+    var arche = archeByKey(key), meta = archeMeta(key);
+    var color = meta.lead ? DIMS[meta.lead].color : 'var(--accent)';
+    return '<div class="card mt10" data-act="archopen" data-key="' + key + '" role="button" tabindex="0" style="cursor:pointer;border-left:3px solid ' + color + '">' +
+      '<div class="row between center">' +
+        '<b style="font-size:15px">' + archEmoji(key) + ' ' + esc(arche.name) + '</b>' +
+        '<span class="mono" style="font-size:12px;color:var(--faint)">' + esc(meta.code) + '</span>' +
+      '</div>' +
+      '<p class="sub mt6" style="font-size:12.5px">' + esc(arche.tag) + '</p>' +
+    '</div>';
+  }).join('');
+
+  return topbar('36 archetypes', 'home') +
+    '<div class="wrap">' +
+      '<div class="eb">Archetype library</div>' +
+      '<p class="sub mt8" style="font-size:13px">Every archetype in the PRISM system, explained using a representative profile \u2014 not your own reading. Take the assessment to see where you actually land.</p>' +
+      '<div class="mt18">' + cards + '</div>' +
+      '<button class="btn ghost block mt24" data-act="home">Back home</button>' +
+    '</div>';
+}
+
+function viewArchDetail() {
+  var key = state.archKey;
+  var arche = archeByKey(key), meta = archeMeta(key);
+  var dims = Engine.exemplar(key);
+  var color = meta.lead ? DIMS[meta.lead].color : 'var(--accent)';
+  var c = careerByKey(key), l = relateByKey(key);
+  var seedKey = 'exemplar:' + key;
+  var profile = genDeep(dims, arche.strengths, arche.shadow, arche.stress, c.fit, c.domains, c.caution, seedKey);
+
+  var dimBars = DIM_ORDER.map(function (d) {
+    return '<div class="dimrow"><div class="dimlabel">' + esc(DIMS[d].name) + '</div>' +
+      '<div class="dimtrack"><div class="dimfill grow" style="width:' + dims[d] + '%;background:' + DIMS[d].color + '"></div></div>' +
+      '<div class="dimval" data-count="' + dims[d] + '">' + dims[d] + '</div></div>';
+  }).join('');
+
+  var contrastCard = '<div class="card mt18" style="border-top:3px solid var(--ink)">' +
+    '<div class="eb">At its best, vs. under sustained stress</div>' +
+    '<div class="mt14"><b style="font-size:13px;color:var(--M)">\u2600 At its best</b>' +
+    '<p class="sub mt6" style="font-size:13px">' + esc(profile.at_best) + '</p></div>' +
+    '<div class="mt18" style="padding-top:14px;border-top:1px solid var(--line)"><b style="font-size:13px;color:var(--S)">\u26a1 Under sustained stress</b>' +
+    '<p class="sub mt6" style="font-size:13px">' + esc(profile.under_stress) + '</p></div></div>';
+
+  var rh = profile.relationship_handling;
+  var rhCard = '<div class="card mt18"><div class="eb">Relationship handling</div>' +
+    rh.sections.map(function (sec) {
+      return '<div class="mt10"><b style="font-size:12.5px">' + esc(sec.label) + '</b>' +
+        '<p class="sub mt6" style="font-size:13px">' + esc(sec.text) + '</p></div>';
+    }).join('') +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">' + esc(rh.synthesis) + '</p></div>';
+
+  var otherCards = ['strength', 'weakness', 'misunderstood', 'shadow', 'emotional', 'logical', 'social', 'dark_traits'].map(function (k) {
+    return '<div class="card mt18"><div class="eb">' + esc(DEEP_LABELS[k]) + '</div><p class="sub mt10">' + esc(profile[k]) + '</p></div>';
+  }).join('');
+
+  var careerCard = '<div class="card mt18"><div class="eb">Career fit</div>' +
+    '<p class="sub mt10">' + esc(c.fit) + '</p>' +
+    '<div class="pill-row mt10">' + c.domains.map(function (s) { return '<span class="pill">' + esc(s) + '</span>'; }).join('') + '</div>' +
+    '<p class="sub mt12" style="font-size:12.5px">' + esc(profile.career) + '</p></div>';
+
+  var relCard = '<div class="card mt18"><div class="eb">In relationships</div>' +
+    '<p class="sub mt10">' + esc(l.style) + '</p>' +
+    '<p class="sub mt10" style="font-size:12.5px"><b>Needs:</b> ' + esc(l.needs) + '</p>' +
+    '<p class="sub mt8" style="font-size:12.5px;color:var(--faint)"><b>Friction:</b> ' + esc(l.friction) + '</p></div>';
+
+  return topbar('Archetype', 'archlib') +
+    '<div class="wrap">' +
+      '<div class="archline"><h2 class="archname" style="color:' + color + '"><span style="font-size:1.25em">' + archEmoji(key) + '</span> ' + esc(arche.name) + '</h2>' +
+      '<span class="arccode mono" style="color:' + color + '">' + esc(meta.code) + '</span></div>' +
+      '<p class="sub mt8">' + esc(arche.tag) + '</p>' +
+      '<p class="sub mt14">' + esc(arche.desc) + '</p>' +
+      (arche.growth ? '<p class="sub mt10" style="font-size:12.5px"><b>Where to grow:</b> ' + esc(arche.growth) + '</p>' : '') +
+      '<div class="card mt18"><div class="eb">Representative dimensions</div>' + dimBars +
+        '<p class="sub mt10" style="font-size:12px;color:var(--faint)">A synthetic, illustrative profile for this archetype \u2014 not your own scores.</p></div>' +
+      contrastCard + otherCards + rhCard + careerCard + relCard +
+      '<div class="mt24"><button class="btn primary block" data-act="start">Take the assessment yourself</button>' +
+        '<button class="btn ghost block mt10" data-act="archlib">Back to all archetypes</button>' +
+        '<button class="btn ghost block mt10" data-act="home">Home</button></div>' +
+    '</div>';
+}
+
+
+/* Real tabs (role=tablist) for views that swap a panel; segmented buttons (aria-pressed) for filters that do not.
+   Arrow keys move focus between tabs; Enter or Space activates (wired in wireActions). */
+function tabsHTML(items, active, act, attr, label, panelId) {
+  return '<div class="tabs" role="tablist" aria-label="' + esc(label) + '">' + items.map(function (t) {
+    var on = t[0] === active;
+    return '<button type="button" role="tab" id="tab-' + act + '-' + esc(t[0]) + '" class="tab' + (on ? ' active' : '') + '" aria-selected="' + (on ? 'true' : 'false') + '"' +
+      (panelId ? ' aria-controls="' + panelId + '"' : '') + ' tabindex="' + (on ? '0' : '-1') + '" data-act="' + act + '" ' + attr + '="' + esc(t[0]) + '">' + esc(t[1]) + '</button>';
+  }).join('') + '</div>';
+}
+function segHTML(items, active, act, attr, label) {
+  return '<div class="tabs" role="group" aria-label="' + esc(label) + '" style="margin-top:10px">' + items.map(function (t) {
+    var on = t[0] === active;
+    return '<button type="button" class="tab' + (on ? ' active' : '') + '" aria-pressed="' + (on ? 'true' : 'false') + '" data-act="' + act + '" ' + attr + '="' + esc(t[0]) + '">' + esc(t[1]) + '</button>';
+  }).join('') + '</div>';
+}
+
+function viewResults() {
+  var r = state.result;
+  var m = r.match, dims = r.dims;
+  var color = m.arche ? (DIMS[m.primary] ? DIMS[m.primary].color : 'var(--accent)') : 'var(--accent)';
+  var sig = Engine.signatureTraits(r.facets);
+  var sigNarrative = TraitsEngine.signature(r).narrative;
+
+  var tabs = [
+    ['profile', 'Summary'],
+    ['facets', '20 Facets'],
+    ['deep', 'Deep Analysis'],
+    ['plus', 'Patterns'],
+    ['career', 'Career'],
+    ['relationship', 'Relationships']
+  ];
+
+  var bands = DIM_ORDER.map(function (d, i) {
+    return '<i style="--w:' + Math.max(6, dims[d]) + ';--i:' + i + ';background:' + DIMS[d].color + '" title="' + esc(DIMS[d].name) + ' ' + dims[d] + '"></i>';
+  }).join('');
+  return topbar('Your result', 'home') +
+    '<div class="wrap" style="--rc:' + color + '">' +
+      '<div class="rhero">' +
+        '<span class="big" aria-hidden="true">' + archEmoji(m.key) + '</span>' +
+        '<div class="archline">' +
+          '<h1 class="archname" style="color:' + color + '" tabindex="-1">' + esc(m.arche.name) + '</h1>' +
+          '<span class="arccode mono" style="color:' + color + '">' + esc(m.code) + '</span>' +
+        '</div>' +
+        '<p class="sub mt8" style="font-size:17px">' + esc(m.arche.tag) + '</p>' +
+        '<div class="rbands" aria-hidden="true">' + bands + '</div>' +
+        '<div class="mt10"><span class="confbadge">Confidence <span data-count="' + m.confidence + '" data-suf="%">' + m.confidence + '%</span>' + (m.lowSignal ? ' \u00b7 low-signal answers detected' : '') + '</span></div>' +
+      '</div>' +
+      '<p class="sub mt18">' + esc(m.arche.desc) + '</p>' +
+      '<p class="sub mt10">' + esc(headerStrengthText(r, m)) + '</p>' +
+      (m.arche.growth ? '<p class="sub mt10" style="font-size:14px"><b>Where to grow:</b> ' + esc(m.arche.growth) + '</p>' : '') +
+
+      '<p class="sub mt18" style="font-size:14px"><b>Start with the Summary.</b> It covers the essentials in five short sections. The other tabs go deeper; you do not need to read them all.</p>' +
+      tabsHTML(tabs, state.resultsTab, 'tab', 'data-tab', 'Report sections', 'tabpanel-tab') +
+
+      '<div class="tabpane" role="tabpanel" id="tabpanel-tab" aria-labelledby="tab-tab-' + esc(state.resultsTab) + '">' +
+      (state.resultsTab === 'profile' ? resultsProfile(r, sig, sigNarrative) : '') +
+      (state.resultsTab === 'facets' ? resultsFacets(r) : '') +
+      (state.resultsTab === 'deep' ? resultsDeep(r, m) : '') +
+      (state.resultsTab === 'plus' ? resultsPlus(r) : '') +
+      (state.resultsTab === 'career' ? resultsCareer(r, m) : '') +
+      (state.resultsTab === 'relationship' ? resultsRelationship(r, m) : '') +
+      '</div>' +
+
+      '<div class="mt32">' +
+        '<fieldset class="card" style="border:1px solid var(--line)"><legend class="eb" style="padding:0 6px">Choose what goes in the PDF</legend>' +
+          '<p class="sub" style="font-size:12px;color:var(--faint)">Untick anything you do not want in a file you might share. Your individual answers are never included. The PDF is a snapshot: it does not update if your result changes later.</p>' +
+          PsychePolicy.SECTIONS.map(function (s) { return '<label class="row" style="gap:8px;align-items:center;margin-top:8px;font-size:13px"><input type="checkbox" data-exp="' + esc(s.key) + '"' + (s.default ? ' checked' : '') + '> <span>' + esc(s.label) + '</span></label>'; }).join('') +
+          '<button class="btn primary block mt12" data-act="exportpdf">Create PDF</button></fieldset>' +
+        '<button class="btn ghost block mt10" data-act="share">Export as image</button>' +
+        '<button class="btn ghost block mt10" data-act="compare">Compare with someone</button>' +
+        '<button class="btn ghost block mt10" data-act="group">Compare a group / team</button>' +
+        '<button class="btn ghost block mt10" data-act="start">Retake the assessment</button>' +
+        '<button class="btn ghost block mt10" data-act="home">Back home</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function profileRadarSVG(dims, text) {
+  var cx = 150, cy = 130, R = 92, n = DIM_ORDER.length;
+  var pt = function (i, k) { var a = -Math.PI / 2 + i * 2 * Math.PI / n; return [cx + Math.cos(a) * R * k, cy + Math.sin(a) * R * k]; };
+  var web = [0.25, 0.5, 0.75, 1].map(function (k) {
+    return '<polygon class="web" points="' + DIM_ORDER.map(function (d, i) { return pt(i, k).map(function (v) { return v.toFixed(1); }).join(','); }).join(' ') + '"/>';
+  }).join('');
+  var spokes = DIM_ORDER.map(function (d, i) { var p = pt(i, 1); return '<line class="web" x1="' + cx + '" y1="' + cy + '" x2="' + p[0].toFixed(1) + '" y2="' + p[1].toFixed(1) + '"/>'; }).join('');
+  var shape = DIM_ORDER.map(function (d, i) { return pt(i, dims[d] / 100).map(function (v) { return v.toFixed(1); }).join(','); }).join(' ');
+  var dots = DIM_ORDER.map(function (d, i) { var p = pt(i, dims[d] / 100); return '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="4.5" fill="' + DIMS[d].color + '"/>'; }).join('');
+  var labels = DIM_ORDER.map(function (d, i) {
+    var p = pt(i, 1.2), anchor = p[0] < cx - 8 ? 'end' : (p[0] > cx + 8 ? 'start' : 'middle');
+    return '<text x="' + p[0].toFixed(1) + '" y="' + (p[1] + 4).toFixed(1) + '" text-anchor="' + anchor + '">' + esc(DIMS[d].name) + '</text>';
+  }).join('');
+  return '<svg class="radar" viewBox="0 0 300 260" role="img" aria-label="Radar chart of your five dimension scores. ' + esc(text || '') + '">' + web + spokes +
+    '<polygon class="shape" points="' + shape + '" fill="var(--rc,var(--ink))" stroke="var(--rc,var(--ink))"/>' + dots + labels + '</svg>';
+}
+
+/* ---------------- Profile dynamics (Phase 2 insight pipeline UI) ---------------- */
+function fbStore() { try { return PsycheIntelligence.feedback(window.localStorage); } catch (e) { return null; } }
+function fbRowHTML(id) {
+  var st = fbStore(), cur = st ? st.get(id) : null;
+  if (!st) return '';
+  var opts = [['accurate', 'Accurate'], ['partly', 'Partly accurate'], ['inaccurate', 'Not accurate']];
+  var btns = opts.map(function (o) {
+    var on = cur && cur.rating === o[0];
+    return '<button type="button" class="btn ghost" data-fb="rate" data-id="' + esc(id) + '" data-rating="' + o[0] + '" aria-pressed="' + (on ? 'true' : 'false') + '" style="padding:6px 10px;font-size:12px;' + (on ? 'border-color:var(--ink);font-weight:700;' : '') + '">' + o[1] + '</button>';
+  }).join('');
+  var note = cur
+    ? '<div class="mt8"><label class="sub" style="font-size:12px" for="fbn-' + esc(id) + '">Optional context (stays on this device)</label>' +
+      '<textarea id="fbn-' + esc(id) + '" maxlength="280" rows="2" style="width:100%;margin-top:4px;font:inherit;font-size:12.5px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--surf);color:var(--ink)">' + esc(cur.note || '') + '</textarea>' +
+      '<div class="row mt6" style="gap:8px"><button type="button" class="btn ghost" data-fb="note" data-id="' + esc(id) + '" style="padding:6px 10px;font-size:12px">Save note</button>' +
+      '<button type="button" class="linkbtn" data-fb="remove" data-id="' + esc(id) + '" style="font-size:12px">Remove my rating</button></div></div>'
+    : '';
+  return '<div class="mt10" role="group" aria-label="How accurate does this feel?"><div class="sub" style="font-size:12px;color:var(--faint)">Does this fit you? Optional, saved only on this device.</div><div class="row mt6" style="gap:6px;flex-wrap:wrap">' + btns + '</div>' + note + '</div>';
+}
+function dynFactsLine(x) {
+  return x.evidence.facets.map(function (f) { return esc(f.name) + ' ' + f.score + '/100 (' + esc(f.pole.toLowerCase()) + ')'; }).join(' · ');
+}
+function dynWhyHTML(x) {
+  var fac = x.evidence.facets.map(function (f) {
+    return '<li>' + esc(f.name) + ': <b>' + f.score + '</b>/100 — ' + esc(f.band === 'hi' ? 'high' : 'low') + ' (' + esc(f.pole.toLowerCase()) + '), ' + f.margin + ' point' + (f.margin === 1 ? '' : 's') + ' past the cut-off</li>';
+  }).join('');
+  var ans;
+  if (x.evidence.answerLevel) {
+    ans = x.evidence.answers.map(function (e) {
+      var nm = (x.evidence.facets.filter(function (f) { return f.key === e.key; })[0] || {}).name || e.key;
+      return '<li><b>' + esc(nm) + '</b><ul style="margin:2px 0 0 14px">' + e.items.map(function (it) { return '<li>“' + esc(it.question) + '” → ' + esc(it.answer) + ' (points toward ' + esc(String(it.pointsToward).toLowerCase()) + ')</li>'; }).join('') + '</ul></li>';
+    }).join('');
+  } else ans = '<li>Answer-level evidence is not available for this saved result (for example, it was synced from another device), so only the scores above were used.</li>';
+  var conf = x.confidence.factors.map(function (f) { return '<li><b>' + (f.effect === 'supports' ? 'Supports' : 'Lowers') + ' — ' + esc(f.name) + ':</b> ' + esc(f.detail) + '</li>'; }).join('');
+  var li = function (arr) { return arr.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join(''); };
+  var h = function (t) { return '<div class="mt10" style="font-size:12px"><b>' + t + '</b></div>'; };
+  return '<details class="mt8"><summary style="cursor:pointer;font-size:12.5px;text-decoration:underline">Why am I seeing this?</summary>' +
+    '<div class="sub" style="font-size:12px;line-height:1.55">' +
+      h('The rule') + '<p class="mt4">' + esc(x.why.rule) + '</p><p class="mt4">' + esc(x.why.thresholds) + '</p>' +
+      h('Scores used') + '<ul style="margin:4px 0 0 16px">' + fac + '</ul>' +
+      h('Answers behind those scores') + '<ul style="margin:4px 0 0 16px">' + ans + '</ul>' +
+      h('How much support this reading has') + '<ul style="margin:4px 0 0 16px">' + conf + '</ul>' +
+      h('Other explanations to consider') + '<ul style="margin:4px 0 0 16px">' + li(x.alternatives) + '</ul>' +
+      h('When it might not apply') + '<p class="mt4">' + esc(x.why.counterexample) + '</p>' +
+      h('Limits') + '<p class="mt4">' + esc(x.limits) + '</p>' +
+      '<p class="mt10 mono" style="font-size:12px;color:var(--faint)">Insight ' + esc(x.id) + ' · engine ' + esc(x.engineVersion) + ' · catalogue ' + esc(x.catalogueVersion) + '</p>' +
+    '</div></details>';
+}
+function dynInsightHTML(x) {
+  var strength = x.patternStrength.label.charAt(0).toUpperCase() + x.patternStrength.label.slice(1);
+  var conf = x.confidence.level.charAt(0).toUpperCase() + x.confidence.level.slice(1);
+  var reasons = x.confidence.reasons.slice(0, 2);
+  return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)">' +
+    '<div class="row" style="align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:13.5px">' + esc(x.title) + '</b>' +
+      '<span class="mono" style="font-size:12px;color:var(--faint)">' + esc(strength) + ' pattern · ' + esc(conf) + ' confidence</span></div>' +
+    '<p class="mono mt4" style="font-size:12px;color:var(--faint)">' + dynFactsLine(x) + '</p>' +
+    '<p class="sub mt6" style="font-size:12.8px">' + esc(x.interpretation) + '</p>' +
+    '<p class="sub mt6" style="font-size:12px"><b>A small experiment (' + esc(x.action.window) + '):</b> ' + esc(x.action.text) + '</p>' +
+    '<p class="sub mt4" style="font-size:12px"><b>You will know it worked when:</b> ' + esc(x.action.success) + '</p>' +
+    (reasons.length ? '<p class="sub mt4" style="font-size:12px;color:var(--faint)">Why confidence is ' + esc(x.confidence.level) + ': ' + esc(reasons.join('; ')) + '.</p>' : '') +
+    dynWhyHTML(x) + '<div id="fb-' + esc(x.id) + '">' + fbRowHTML(x.id) + '</div>' +
+  '</div>';
+}
+function profileIntelligenceHTML(r, report) {
+  if (!report) { if (typeof PsycheIntelligence === 'undefined' || !PsycheIntelligence.generate) return ''; report = PsycheIntelligence.generate(r); }
+  if (!report.available) return '<p class="sub mt10" style="font-size:13px">There is not enough answer data to show cross-trait patterns for this result.</p>';
+  var cal = report.calibration;
+  var head = '';
+  var body;
+  if (report.abstained) {
+    body = '<div class="mt12" role="status" style="padding:12px;border:1px solid var(--line);border-radius:10px"><b style="font-size:13px">No cross-trait insights shown</b><p class="sub mt6" style="font-size:12.5px">' + esc(report.abstained.reason) + '</p></div>';
+  } else {
+    var primary = report.insights.filter(function (x) { return x.tier === 'primary'; });
+    var more = report.insights.filter(function (x) { return x.tier === 'more'; });
+    body = primary.map(dynInsightHTML).join('');
+    if (more.length) {
+      body += state.dynMore
+        ? more.map(dynInsightHTML).join('') + '<button type="button" class="linkbtn mt10" data-act="dynless">Show fewer</button>'
+        : '<button type="button" class="btn ghost block mt14" data-act="dynmore">Show ' + more.length + ' more pattern' + (more.length === 1 ? '' : 's') + '</button>';
+    }
+    if (!report.insights.length) body = '<p class="sub mt10" style="font-size:12.5px">No cross-trait pattern is clear enough to show. That usually means your scores sit near the middle on the facets these patterns need, which is a legitimate result, not a gap.</p>';
+    var quiet = report.suppressed.filter(function (x) { return x.reason === 'facet_in_midrange' || x.reason === 'balanced'; }).length;
+    if (quiet) body += '<p class="sub mt12" style="font-size:12px;color:var(--faint)">' + quiet + ' other pattern' + (quiet === 1 ? ' was' : 's were') + ' not shown because one or both traits sit in the middle range, where there is too little signal to say anything specific.</p>';
+    if (report.conflicts.length) body += '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Some patterns above point in different directions. That can be accurate: tendencies depend on context.</p>';
+  }
+  var st = fbStore(), hasFb = st && Object.keys(st.all()).length;
+  return '<div class="card mt14" style="border-top:3px solid var(--ink)">' + head + body +
+    '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:12.5px">Interpretation guardrail · ' + esc(cal.label) + '</b>' +
+      '<p class="sub mt4" style="font-size:12px">' + esc(cal.scoreEvidence) + ' ' + esc(cal.caveat) + '</p></div>' +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">' + esc(report.method) + ' Engine ' + esc(report.engineVersion) + '.</p>' +
+    (hasFb ? '<button type="button" class="linkbtn" data-fb="clearall" style="font-size:12px">Delete all my insight ratings (this device)</button>' : '') +
+  '</div>';
+}
+
+function dimRowHTML(r, d) {
+  var score = r.dims[d], mean = PsycheUX.scoreMeaning(d, score), name = DIMS[d].name;
+  return '<details class="dimdetail"><summary><span class="dimrow"><span class="dimlabel">' + esc(name) + '</span>' +
+    '<span class="dimtrack" aria-hidden="true"><span class="dimfill" style="width:' + score + '%;background:' + DIMS[d].color + '"></span><i class="tick" style="left:38%"></i><i class="tick" style="left:62%"></i></span>' +
+    '<span class="dimval">' + score + '</span><span class="dimband">' + esc(mean.label) + '</span></span></summary>' +
+    '<div class="dimbody"><p class="sub"><b>' + esc(name) + '</b> is ' + esc(mean.is) + '</p>' +
+    '<p class="sub mt8"><b>Your score:</b> ' + score + ' out of 100, ' + esc(mean.label.toLowerCase()) + '. ' + esc(mean.means) + '</p>' +
+    '<p class="sub mt8"><b>What it does not mean:</b> it is not a measure of ' + esc(mean.isNot) + ' It describes how you answered 40 statements, not a fixed fact about you.</p>' +
+    '<p class="sub mt8"><b>One thing to try:</b> ' + esc(mean.next) + '</p></div></details>';
+}
+function closeCallHTML(r) {
+  var cc = PsycheUX.closeCall(r.dims, DIM_ORDER, function (d) { return Engine.match(d, null); }, r.match.key);
+  if (!cc) return '';
+  var names = cc.alts.map(function (k) { return '<b>' + esc(archeByKey(k).name) + '</b>'; }).join(' or ');
+  return '<p class="sub mt14 callout" style="font-size:13.5px"><b>A close reading.</b> One or two different answers could have given ' + names + ' instead of ' + esc(r.match.arche.name) + '. Treat the name as a starting point and rely on the five scores.</p>';
+}
+function sumSection(n, title, intro, body) {
+  return '<section class="sumsec" aria-labelledby="sum-' + n + '"><h2 class="sumh" id="sum-' + n + '"><span class="sumn" aria-hidden="true">' + n + '</span>' + esc(title) + '</h2>' +
+    (intro ? '<p class="sub mt6" style="font-size:14px">' + intro + '</p>' : '') + body + '</section>';
+}
+function actionsHTML(report, r) {
+  var items = [];
+  if (report && report.available && !report.abstained) {
+    report.insights.filter(function (x) { return x.tier === 'primary'; }).slice(0, 2).forEach(function (x) {
+      items.push('<li><b>' + esc(x.title) + '.</b> ' + esc(x.action.text) + ' <span class="sub">(' + esc(x.action.window) + ')</span><br><span class="sub">You will know it worked when: ' + esc(x.action.success) + '</span></li>');
+    });
+  }
+  if (!items.length) {
+    var far = DIM_ORDER.slice().sort(function (a, b) { return Math.abs(r.dims[b] - 50) - Math.abs(r.dims[a] - 50); })[0];
+    var mean = PsycheUX.scoreMeaning(far, r.dims[far]);
+    items.push('<li><b>' + esc(DIMS[far].name) + '.</b> ' + esc(mean.next) + '</li>');
+  }
+  return '<ul class="actionlist">' + items.join('') + '</ul><p class="sub mt10" style="font-size:13px">These are small experiments, not instructions. If one does not fit your life, skip it. Each insight in the section above shows the evidence behind it.</p>';
+}
+function limitsHTML(r) {
+  var q = r.match.confidence;
+  return '<ul class="plainlist" style="font-size:14px">' +
+    '<li><b>What this is.</b> A structured self-reflection tool based on how you answered 40 statements about yourself.</li>' +
+    '<li><b>What the numbers are.</b> Each trait comes from only two questions, so a single different answer can move it by about 12 points. Small differences between traits are likely noise.</li>' +
+    '<li><b>Confidence (' + q + '%).</b> This is how clear this particular reading is given how you answered, not how strong any trait is.</li>' +
+    '<li><b>What it is not.</b> Not a diagnosis, not a clinical or hiring tool, and not a prediction of how you will behave. No validation study has been run yet.</li></ul>' +
+    '<button type="button" class="btn ghost mt10" data-act="science" data-sci="limits">Read the full method and limits</button>' +
+    '<details class="mt14 words"><summary>Words used in this report</summary><dl>' +
+      '<dt>Dimension</dt><dd>One of five broad areas: Perception, Response, Identity, Social, Motivation.</dd>' +
+      '<dt>Facet</dt><dd>One of 20 narrower tendencies, four inside each dimension.</dd>' +
+      '<dt>Archetype</dt><dd>A named pattern chosen by a fixed rule from your highest dimension scores. It is a label, not a type you are.</dd>' +
+      '<dt>Confidence</dt><dd>How clear this reading is given how you answered.</dd>' +
+      '<dt>Hypothesis</dt><dd>A possible explanation to test against your own experience, not a fact about you.</dd></dl></details>';
+}
+function resultsProfile(r, sig, sigNarrative) {
+  var report = null;
+  try { report = (typeof PsycheIntelligence !== 'undefined' && PsycheIntelligence.generate) ? PsycheIntelligence.generate(r) : null; } catch (e) { report = null; try { PsycheOps.report('error', { name: e && e.name, stack: e && e.stack, code: 'insight_fallback' }); } catch (_) {} }
+  var radarText = DIM_ORDER.map(function (d) { return PsycheUX.scoreText(DIMS[d].name, r.dims[d]); }).join('; ');
+  var skippedNote = r.skipped > 0 ? '<div class="card mt18" role="note"><div class="eb">Incomplete assessment</div><p class="sub mt8" style="font-size:13px">' + r.skipped + ' of ' + QUESTIONS.length + ' questions were skipped and counted as neutral, so these scores are less reliable. Retaking with every question answered gives a firmer reading.</p></div>' : '';
+
+  var s1 = sumSection(1, 'Your overall profile',
+    'Five scores from 0 to 100. Select a dimension to see what its score means and what it does not.',
+    '<div class="card mt14">' + profileRadarSVG(r.dims, radarText) +
+      '<div class="mt10">' + DIM_ORDER.map(function (d) { return dimRowHTML(r, d); }).join('') + '</div>' +
+      '<p class="sub mt10" style="font-size:12.5px">Ticks on each bar mark the lower-range (38) and higher-range (62) cut-offs. The range is also written next to each score, so colour is never the only signal.</p>' +
+    '</div>' + closeCallHTML(r));
+
+  var sigPills = sig.map(function (t) { return '<span class="pill"><span class="pdot" style="background:' + t.color + '" aria-hidden="true"></span>' + esc(t.name) + '</span>'; }).join('');
+  var s2 = sumSection(2, 'Your strongest findings', 'The traits that sit furthest from the middle of their scale.',
+    '<div class="pill-row mt10">' + (sigPills || '<span class="sub">No single trait stands out sharply.</span>') + '</div><p class="sub mt10">' + esc(sigNarrative) + '</p>');
+
+  var s3 = sumSection(3, 'Profile dynamics', 'Hypotheses about how two tendencies may reinforce or complicate each other, with the evidence behind each one.',
+    profileIntelligenceHTML(r, report));
+  var s4 = sumSection(4, 'What you could try', null, actionsHTML(report, r));
+  var s5 = sumSection(5, 'Method and limits', 'Read this before relying on anything above.', limitsHTML(r));
+  return skippedNote + s1 + s2 + s3 + s4 + s5;
+}
+
+/* Deep Analysis sections are built from shared pools, so a sentence can recur across sections.
+   Keep the first occurrence in display order; never empty a section. */
+function dedupeDeep(profile, exclude) {
+  var seen = TextDedupe.seenSet(exclude);
+  function one(text) { var kept = TextDedupe.dedupeText(text, seen); return kept || text; }
+  ['at_best', 'under_stress'].concat(DEEP_ORDER).forEach(function (k) {
+    var v = profile[k];
+    if (typeof v === 'string') profile[k] = one(v);
+    else if (v && v.sections) {
+      if (v.intro) v.intro = one(v.intro);
+      v.sections.forEach(function (sec) { sec.text = one(sec.text); });
+      if (v.synthesis) v.synthesis = one(v.synthesis);
+    }
+  });
+  return profile;
+}
+function genDeep(a, b, c, d, e, f, g, h, exclude) { return dedupeDeep(generateFullDeepProfile(a, b, c, d, e, f, g, h), exclude); }
+// the generated strengths paragraph shown under the archetype name on every results tab
+function headerStrengthText(r, m) {
+  return generateDeepSection('strength', r.dims, factsSeedKey(r) + ':intro', 'Named strengths include ' + m.arche.strengths.map(function (s) { return s.toLowerCase(); }).join(', ') + '.');
+}
+function deepProfileFor(r, m) {
+  var c = careerByKey(m.key);
+  return genDeep(r.dims, m.arche.strengths, m.arche.shadow, m.arche.stress, c.fit, c.domains, c.caution, factsSeedKey(r) + ':' + m.key, [headerStrengthText(r, m)]);
+}
+function collectStrings(o, out) {
+  if (typeof o === 'string') out.push(o);
+  else if (Array.isArray(o)) o.forEach(function (x) { collectStrings(x, out); });
+  else if (o && typeof o === 'object') Object.keys(o).forEach(function (k) { collectStrings(o[k], out); });
+  return out;
+}
+// the 20 traits, with any sentence already shown on the Deep Analysis tab removed from the long-form text
+function traitsDeduped(r) {
+  var T = TraitsEngine.generate(r);
+  try {
+    var seen = TextDedupe.seenSet(collectStrings(deepProfileFor(r, r.match), []));
+    T.traits.forEach(function (t) { t.in_depth = TextDedupe.dedupeParagraphs(t.in_depth, seen); });
+  } catch (e) { /* dedupe is best-effort; the engine output is already valid */ }
+  return T;
+}
+function resultsFacets(r) {
+  var colors = { P: 'var(--P)', R: 'var(--R)', I: 'var(--I)', S: 'var(--S)', M: 'var(--M)' };
+  var T = traitsDeduped(r);
+  var confCol = { high: 'var(--M)', medium: 'var(--I)', low: 'var(--faint)' };
+  var factsHTML = '<div class="mt18">' +
+    '<div class="eb">Twenty traits about you</div>' +
+    '<p class="sub mt6" style="font-size:12.5px">Each trait is built from your own answers and scores, with the evidence shown. Confidence reflects how good the evidence is, not how strongly you hold the trait.</p>' +
+    (T.assessment_context.input_limitation ? '<p class="sub mt6" style="font-size:12.5px"><b>Note:</b> ' + esc(T.assessment_context.input_limitation) + ' Retake the assessment on this device for answer-level evidence.</p>' : '') +
+    '<p class="sub mt6" style="font-size:12px;color:var(--faint)">' + esc(T.assessment_context.selection_note) + '</p>' +
+    '<button class="btn ghost mt10" data-act="traitsjson">Download traits (JSON)</button>' +
+    T.traits.map(function (t) {
+      return '<div class="card mt14"><div class="row between center"><span class="eb">' + esc(t.category) + '</span>' +
+        '<span class="mono" style="font-size:12px;color:' + confCol[t.confidence] + '">' + esc(t.confidence) + ' confidence</span></div>' +
+        '<b style="font-size:15px;display:block;margin-top:6px">' + t.id + '. ' + esc(t.title) + '</b>' +
+        '<p class="sub mt6" style="font-size:13.5px;line-height:1.65">' + esc(t.description) + ' ' + esc(t.everyday_manifestation) + '</p>' +
+        '<p class="sub mt6" style="font-size:13px"><b>Strength:</b> ' + esc(t.potential_strength) + '</p>' +
+        '<p class="sub mt6" style="font-size:13px"><b>Watch for:</b> ' + esc(t.potential_challenge) + '</p>' +
+        '<p class="sub mt6" style="font-size:13px"><b>Try:</b> ' + esc(t.practical_insight) + '</p>' +
+        '<details class="mt8" open><summary style="cursor:pointer;font-size:12.5px;text-decoration:underline">In depth</summary>' +
+        t.in_depth.split('\n\n').map(function (p) { var i = p.indexOf(': '); return '<p class="sub mt8" style="font-size:13px;line-height:1.7"><b>' + esc(p.slice(0, i)) + '.</b> ' + esc(p.slice(i + 2)) + '</p>'; }).join('') + '</details>' +
+        '<details class="mt8"><summary style="cursor:pointer;font-size:12.5px;text-decoration:underline">Why this was identified</summary>' +
+        '<p class="sub mt6" style="font-size:12.5px">' + esc(t.evidence_from_answers) + '</p>' +
+        '<p class="sub mt6" style="font-size:12.5px"><i>' + esc(t.confidence_reason) + '</i></p></details></div>';
+    }).join('') +
+  '</div>';
+
+  var dims = '<div class="mt24"><div class="eb">Full breakdown</div>' +
+    DIM_ORDER.map(function (d) {
+      var rows = Object.keys(DIMS[d].facets).map(function (fk) {
+        var key = d + '.' + fk, s = r.facets[key], fac = DIMS[d].facets[fk];
+        var pole = s >= 50 ? fac.hi : fac.lo;
+        var desc = Engine.facetDescription(d, fk, s);
+        return '<div class="facetrow"><div class="facethead"><span>' + esc(pole[0]) + '</span><span class="mono">' + s + ' \u00b7 ' + esc(PsycheUX.BAND_LABEL[PsycheUX.bandFor(s)].toLowerCase()) + '</span></div>' +
+          '<div class="facetdesc">' + esc(desc) + '</div>' +
+          '<div class="facetbar" aria-hidden="true"><div class="facetbarfill grow" style="width:' + s + '%;background:' + colors[d] + '"></div></div></div>';
+      }).join('');
+      return '<div class="card mt14"><div class="row between center"><span class="eb" style="color:' + colors[d] + '">' + esc(DIMS[d].name) + '</span><span class="mono" style="font-size:13px">' + r.dims[d] + '</span></div>' +
+        '<div class="facetgroup">' + rows + '</div></div>';
+    }).join('') +
+  '</div>';
+
+  return factsHTML + dims;
+}
+
+function factsSeedKey(r) {
+  return DIM_ORDER.map(function (d) { return r.dims[d]; }).join('-');
+}
+
+/* ---------------- DEEP ANALYSIS ---------------- */
+var DEEP_LABELS = {
+  strength: 'Strength', weakness: 'Weakness', misunderstood: 'Misunderstood as', shadow: 'Shadow',
+  emotional: 'Emotional side', logical: 'Critical & logical side', relationship_handling: 'Relationship handling',
+  social: 'Social side', dark_traits: 'Dark traits', career: 'Career, in depth'
+};
+var DEEP_ORDER = ['strength', 'weakness', 'misunderstood', 'shadow', 'emotional', 'logical', 'relationship_handling', 'social', 'dark_traits', 'career'];
+
+function resultsDeep(r, m) {
+  var c = careerByKey(m.key);
+  var seedKey = factsSeedKey(r) + ':' + m.key;
+  var profile = deepProfileFor(r, m);
+  var contrastCard = '<div class="card mt18" style="border-top:3px solid var(--ink)">' +
+    '<div class="eb">At your best, vs. under sustained stress</div>' +
+    '<div class="mt14"><b style="font-size:13px;color:var(--M)">\u2600 At your best</b>' +
+    '<p class="sub mt6" style="font-size:13px">' + esc(profile.at_best) + '</p></div>' +
+    '<div class="mt18" style="padding-top:14px;border-top:1px solid var(--line)"><b style="font-size:13px;color:var(--S)">\u26a1 Under sustained stress</b>' +
+    '<p class="sub mt6" style="font-size:13px">' + esc(profile.under_stress) + '</p></div>' +
+  '</div>';
+
+  return '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Every section below is generated from your actual scores, not picked from a fixed list \u2014 two people with the same archetype but different numbers will read different text here. Read each section as a hypothesis about tendencies, built from the five dimension scores, to check against your own experience. It is not a fact about you, and it does not use your individual answers.</p>' +
+    contrastCard +
+    DEEP_ORDER.map(function (key) {
+      if (key === 'relationship_handling') {
+        var rh = profile[key];
+        var subRows = rh.sections.map(function (sec) {
+          return '<div class="mt10"><b style="font-size:12.5px">' + esc(sec.label) + '</b> <span class="mono" style="font-size:12px;color:var(--faint)">' + sec.score + '</span>' +
+            '<p class="sub mt6" style="font-size:13px">' + esc(sec.text) + '</p></div>';
+        }).join('');
+        return '<div class="card mt18"><div class="eb">' + esc(DEEP_LABELS[key]) + '</div>' +
+          (rh.intro ? '<p class="sub mt10">' + esc(rh.intro) + '</p>' : '') +
+          subRows +
+          '<p class="sub mt14" style="font-size:12px;color:var(--faint)">' + esc(rh.synthesis) + '</p></div>';
+      }
+      return '<div class="card mt18"><div class="eb">' + esc(DEEP_LABELS[key]) + '</div>' +
+        '<p class="sub mt10">' + esc(profile[key]) + '</p></div>';
+    }).join('');
+}
+
+
+
+function resultsCareer(r, m) {
+  var c = careerByKey(m.key);
+  return '<div class="card mt18">' +
+    '<div class="eb">Career fit</div>' +
+    '<p class="sub mt10">' + esc(c.fit) + '</p>' +
+    '<div class="pill-row mt10">' + c.domains.map(function (s) { return '<span class="pill">' + esc(s) + '</span>'; }).join('') + '</div>' +
+    '<p class="sub mt14" style="font-size:12.5px"><b>Specifically, for you:</b> ' + esc(Engine.careerElaboration(r.dims)) + '</p>' +
+    '<p class="sub mt10" style="font-size:12.5px;color:var(--faint)"><b>Watch for:</b> ' + esc(c.caution) + '</p>' +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Based on your archetype and dimension scores. A starting point for reflection, not a prediction of success in any role, and not a basis for hiring or selection.</p>' +
+  '</div>';
+}
+
+function resultsRelationship(r, m) {
+  var l = relateByKey(m.key);
+  var seedKey = factsSeedKey(r) + ':' + m.key + ':reltab';
+  var rh = generateRelationshipHandlingDeep(r.dims, null, seedKey);
+
+  var subCards = rh.sections.map(function (sec) {
+    return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)">' +
+      '<div class="row between center"><b style="font-size:13.5px">' + esc(sec.label) + '</b>' +
+      '<span class="mono" style="font-size:12px;color:var(--faint)">' + sec.score + '/100</span></div>' +
+      '<p class="sub mt6" style="font-size:13.5px;line-height:1.65">' + esc(sec.text) + '</p></div>';
+  }).join('');
+
+  return '<div class="card mt18">' +
+    '<div class="eb">In relationships</div>' +
+    '<p class="sub mt10">' + esc(l.style) + '</p>' +
+    '<p class="sub mt10" style="font-size:12.5px"><b>Needs:</b> ' + esc(l.needs) + '</p>' +
+    '<p class="sub mt8" style="font-size:12.5px;color:var(--faint)"><b>Friction:</b> ' + esc(l.friction) + '</p>' +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Based on your archetype and scores. Tendencies to talk about with people close to you, not a verdict on how any relationship will go.</p>' +
+  '</div>' +
+  '<div class="card mt14">' +
+    '<div class="eb">The full breakdown</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Five sub-themes, each generated from your actual scores \u2014 not just an archetype-level summary.</p>' +
+    subCards +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint);padding-top:12px;border-top:1px solid var(--line)">' + esc(rh.synthesis) + '</p>' +
+  '</div>';
+}
+
+/* ---------------- SHARE CARD (canvas export, no server round-trip) ---------------- */
+/* ---------------- PDF EXPORT (complete report, browser print-to-PDF) ---------------- */
+
+/* ---------------- ENGINE PLUS: PDF sections ---------------- */
+function rsec(title, body, brk) { return '<div class="preport-section' + (brk ? ' preport-page-break' : '') + '"><h2>' + esc(title) + '</h2>' + body + '</div>'; }
+function rp(t) { return '<p style="font-size:12px">' + t + '</p>'; }
+function plusReportInd(r) {
+  if (!EnginePlus.validFacets(r.facets)) return '';
+  var IND = EnginePlus.individual(r.facets);
+  return rsec('Patterns & tensions', (IND.patterns.length ? IND.patterns.slice(0, 4).map(function (p) { return rp('<b>' + esc(p.name) + '</b> — ' + esc(p.text) + ' <i>Watch for:</i> ' + esc(p.watch) + ' <i>Try:</i> ' + esc(p.tip)); }).join('') : rp('No sharply defined combination pattern — a balanced profile.')) +
+      IND.tensions.map(function (t) { return rp('<b>Tension</b> (' + esc(t.a) + ' / ' + esc(t.b) + ') — ' + esc(t.text) + ' <i>Try:</i> ' + esc(t.tip)); }).join(''), true) +
+    rsec('How you handle 8 situations', IND.scenarios.map(function (s) { return rp('<b>' + esc(s.title) + '</b> (' + s.score + ', ' + bandLabel(s.band).toLowerCase() + ') — ' + esc(s.text)); }).join('')) +
+    rsec('Growth plan', IND.growth.map(function (g, i) { return rp((i + 1) + '. <b>' + esc(g.title) + '</b> — ' + esc(g.step)); }).join('') + IND.leverage.map(function (g) { return rp('<b>Leverage:</b> ' + esc(g.title) + ' — ' + esc(g.step)); }).join(''));
+}
+function plusReportPair(mine, them) {
+  if (!EnginePlus.validFacets(mine.facets) || !EnginePlus.validFacets(them.facets)) return '';
+  var PX = EnginePlus.pair(mine.facets, them.facets, mine.name, them.name, state.compatLens);
+  var li = function (r) { return rp('<b>' + esc(r.name) + '</b> (' + r.a + ' / ' + r.b + ') — ' + esc(r.text)); };
+  return rsec('Facet-level comparison — ' + PX.lens.label, rp(esc(PX.lens.lead)) + rp('<b>Worth doing:</b> ' + esc(PX.lens.tip)) +
+      rp('<b>Strongest shared traits</b>') + (PX.sync.map(li).join('') || rp('None where you both lean strongly the same way.')) +
+      rp('<b>Biggest differences</b>') + (PX.friction.map(li).join('') || rp('No facet differs by 20+ points.')), true) +
+    rsec('Situations, together', PX.scenarios.map(function (s) { return rp('<b>' + esc(s.title) + '</b> (' + s.joint + ') — ' + esc(s.text)); }).join('')) +
+    rsec('All 20 facets', PX.rows.map(li).join('')) +
+    rsec('Conversation starters', PX.starters.map(function (x) { return rp('“' + esc(x.text) + '”'); }).join('')) +
+    plusReportTraitsPair(mine, them);
+}
+function plusReportGroup(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return '';
+  var GP = EnginePlus.group(fm);
+  return rsec('Situations — how the group handles them', GP.scenarios.map(function (s) { return rp('<b>' + esc(s.title) + '</b> (avg ' + s.avg + ') — ' + esc(s.text)); }).join(''), true) +
+    rsec('Team roles & gaps', GP.roles.map(function (r) { return rp('<b>' + esc(r.name) + '</b> — ' + (r.state === 'covered' ? 'covered by ' + esc(r.champions.join(', ')) : r.state === 'partial' ? 'partly covered (closest: ' + esc(r.top) + '). ' + esc(r.gap) : 'gap. ' + esc(r.gap))); }).join('')) +
+    rsec('Suggested team actions', GP.actions.map(function (a, i) { return rp((i + 1) + '. ' + esc(a)); }).join('')) +
+    (GP.highlights.length ? rsec('Facet highlights', GP.highlights.map(function (t) { return rp(esc(t)); }).join('')) : '') +
+    plusReportTraitsGroup(members);
+}
+
+function buildFullReportHTML(r, m, sections) {
+  var SEL = PsychePolicy.normalizeSections(sections), has = function (k) { return SEL.indexOf(k) !== -1; };
+  var dims = r.dims;
+  var colors = { P: '#6D28D9', R: '#1D4ED8', I: '#B45309', S: '#BE123C', M: '#047857' };
+  var sig = Engine.signatureTraits(r.facets);
+  var sigNarrative = TraitsEngine.signature(r).narrative;
+  var c = careerByKey(m.key);
+  var l = relateByKey(m.key);
+  var seedKey = factsSeedKey(r) + ':' + m.key;
+  var profile = deepProfileFor(r, m);
+  var T = traitsDeduped(r);
+
+  var now = new Date();
+  var dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+
+  var header = '<div class="preport-header">' +
+    '<h1>' + archEmoji(m.key) + ' ' + esc(m.arche.name) + '</h1>' +
+    '<div class="preport-meta">' + esc(m.code) + ' \u00b7 CONFIDENCE ' + m.confidence + '% \u00b7 GENERATED ' + dateStr + ' \u00b7 PSYCHE CORE</div>' +
+    '</div>' +
+    '<p style="font-size:12.5px;line-height:1.65">' + esc(m.arche.tag) + '</p>' +
+    '<p style="font-size:12px;line-height:1.65;color:#333">' + esc(m.arche.desc) + '</p>' +
+    DIM_ORDER.map(function (d) {
+      return '<div class="preport-dimrow"><div class="preport-dimlabel">' + esc(DIMS[d].name) + '</div>' +
+        '<div class="preport-track"><div class="preport-fill" style="width:' + dims[d] + '%;background:' + colors[d] + '"></div></div>' +
+        '<div class="preport-val">' + dims[d] + '</div></div>';
+    }).join('');
+
+  var signature = '<div class="preport-section"><h2>Signature traits</h2><p>' + esc(sigNarrative) + '</p></div>';
+
+  var factsSection = '<div class="preport-section preport-page-break"><h2>Twenty traits about you</h2>' +
+    T.traits.map(function (t) {
+      return '<div class="preport-facet"><div class="fh"><span>' + t.id + '. ' + esc(t.title) + '</span><span>' + esc(t.confidence) + ' confidence</span></div>' +
+        '<p style="font-size:11px;color:#666">' + esc(t.category) + '</p>' +
+        '<p>' + esc(t.description) + ' ' + esc(t.everyday_manifestation) + '</p>' +
+        '<p><b>Strength:</b> ' + esc(t.potential_strength) + ' <b>Watch for:</b> ' + esc(t.potential_challenge) + '</p>' +
+        '<p><b>Try:</b> ' + esc(t.practical_insight) + '</p>' +
+        t.in_depth.split('\n\n').map(function (p) { return '<p style="font-size:11.5px">' + esc(p) + '</p>'; }).join('') +
+        '<p style="font-size:10.5px;color:#666"><i>Evidence: ' + esc(t.evidence_from_answers) + ' ' + esc(t.confidence_reason) + '</i></p></div>';
+    }).join('') + '</div>';
+
+  var contrastSection = '<div class="preport-section"><h2>At your best, vs. under sustained stress</h2>' +
+    '<p style="font-weight:650;font-size:12.5px;margin-top:10px">At your best</p>' +
+    '<p style="font-size:12px">' + esc(profile.at_best) + '</p>' +
+    '<p style="font-weight:650;font-size:12.5px;margin-top:10px">Under sustained stress</p>' +
+    '<p style="font-size:12px">' + esc(profile.under_stress) + '</p></div>';
+
+  var deepSection = '<div class="preport-section preport-page-break"><h2>Deep analysis</h2>' +
+    DEEP_ORDER.map(function (key) {
+      if (key === 'relationship_handling') {
+        var rh = profile[key];
+        return '<p style="font-weight:650;font-size:12.5px;margin-top:14px">' + esc(DEEP_LABELS[key]) + '</p>' +
+          rh.sections.map(function (sec) {
+            return '<p style="font-size:12px;margin-top:6px"><b>' + esc(sec.label) + ' (' + sec.score + '):</b> ' + esc(sec.text) + '</p>';
+          }).join('') +
+          '<p style="font-size:11.5px;color:#555;margin-top:6px"><i>' + esc(rh.synthesis) + '</i></p>';
+      }
+      return '<p style="font-weight:650;font-size:12.5px;margin-top:14px">' + esc(DEEP_LABELS[key]) + '</p>' +
+        '<p style="font-size:12px">' + esc(profile[key]) + '</p>';
+    }).join('') + '</div>';
+
+  var careerSection = '<div class="preport-section"><h2>Career fit</h2>' +
+    '<p>' + esc(c.fit) + '</p>' +
+    '<p><b>Roles:</b> ' + c.domains.map(esc).join(', ') + '</p>' +
+    '<p><b>Specifically, for you:</b> ' + esc(Engine.careerElaboration(dims)) + '</p>' +
+    '<p><b>Watch for:</b> ' + esc(c.caution) + '</p></div>';
+
+  var relSection = '<div class="preport-section"><h2>In relationships</h2>' +
+    '<p>' + esc(l.style) + '</p>' +
+    '<p><b>Needs:</b> ' + esc(l.needs) + '</p>' +
+    '<p><b>Friction:</b> ' + esc(l.friction) + '</p>' +
+    '<p style="font-size:11px;color:#888">See "Relationship handling" under Deep Analysis above for the full five-part breakdown.</p></div>';
+
+  var footer = PsychePolicy.metaHTML(PsychePolicy.reportMeta(r, 'Individual'), esc);
+
+  return header + (has('summary') ? signature : '') + (has('traits') ? factsSection : '') + (has('contrast') ? contrastSection : '') + (has('deep') ? deepSection : '') +
+    (has('career') ? careerSection : '') + (has('relations') ? relSection : '') + (has('patterns') ? plusReportInd(r) : '') + footer;
+}
+
+function buildCompatReportHTML(mine, them, c, dc, archNarrative) {
+  var colors = { P: '#6D28D9', R: '#1D4ED8', I: '#B45309', S: '#BE123C', M: '#047857' };
+  var now = new Date();
+  var dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  var header = '<div class="preport-header">' +
+    '<h1>' + esc(mine.name) + ' \u00d7 ' + esc(them.name) + '</h1>' +
+    '<div class="preport-meta">PROFILE SIMILARITY ' + c.score + ' \u00b7 GENERATED ' + dateStr + ' \u00b7 PSYCHE CORE</div>' +
+    '</div>' +
+    '<p style="font-size:12.5px;line-height:1.65">' + esc(c.synthesis) + '</p>';
+
+  var notes = '<div class="preport-section"><h2>Read</h2>' +
+    c.notes.map(function (n) { return '<p style="font-weight:650;font-size:12.5px;margin-top:10px">' + esc(n.t) + '</p><p style="font-size:12px">' + esc(n.p) + '</p>'; }).join('') +
+  '</div>';
+
+  var archSection = archNarrative ? '<div class="preport-section"><h2>As archetypes</h2><p style="font-size:12px">' + esc(archNarrative) + '</p></div>' : '';
+
+  var trait = '<div class="preport-section preport-page-break"><h2>Trait-by-trait</h2>' +
+    dc.dims.map(function (x) {
+      return '<div class="preport-facet"><div class="fh"><span>' + esc(x.name) + '</span><span>' + x.harmony + '% aligned</span></div>' +
+        '<div class="preport-dimrow"><div class="preport-dimlabel">' + esc(mine.name) + '</div><div class="preport-track"><div class="preport-fill" style="width:' + x.aScore + '%;background:' + colors[x.dim] + '"></div></div><div class="preport-val">' + x.aScore + '</div></div>' +
+        '<div class="preport-dimrow"><div class="preport-dimlabel">' + esc(them.name) + '</div><div class="preport-track"><div class="preport-fill" style="width:' + x.bScore + '%;background:' + colors[x.dim] + '"></div></div><div class="preport-val">' + x.bScore + '</div></div>' +
+        '<p>' + esc(x.text) + '</p></div>';
+    }).join('') +
+  '</div>';
+
+  var conflict = '<div class="preport-section"><h2>Conflict style</h2>' +
+    '<p>' + esc(c.conflict.why) + '</p>' +
+    (c.conflict.dim ? '<p><b>A way through:</b> ' + esc(c.conflict.bridge) + '</p>' : '<p>' + esc(c.conflict.bridge) + '</p>') +
+  '</div>';
+
+  var footer = '<div class="preport-footer"><p><b>Similarity is not compatibility.</b> ' + esc(PsychePolicy.SIMILARITY_NOTE) + '</p><p>Computed in your browser from the scores both people chose to share. ' + esc(PsychePolicy.USE_LIMITS) + '</p></div>' + PsychePolicy.metaHTML(PsychePolicy.reportMeta(mine, 'Comparison'), esc);
+
+  return header + notes + archSection + trait + conflict + plusReportPair(mine, them) + footer;
+}
+
+function buildGroupReportHTML(members, g) {
+  var GI = GroupInsights.build(members, g);
+  var colors = { P: '#6D28D9', R: '#1D4ED8', I: '#B45309', S: '#BE123C', M: '#047857' };
+  var dateStr = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  var sec = function (title, body, brk) { return '<div class="preport-section' + (brk ? ' preport-page-break' : '') + '"><h2>' + esc(title) + '</h2>' + body + '</div>'; };
+  var li = function (dim, text) { return '<p style="font-size:12px">' + (dim ? '<b>' + esc(DIMS[dim].name) + '</b> — ' : '') + esc(text) + '</p>'; };
+  var header = '<div class="preport-header">' +
+    '<h1>Group report · ' + g.n + ' people</h1>' +
+    '<div class="preport-meta">TEAM ARCHETYPE ' + archEmoji(g.teamMatch.key) + ' ' + esc(g.teamMatch.arche.name) + ' · GENERATED ' + dateStr + ' · PSYCHE CORE</div>' +
+    '</div>' +
+    DIM_ORDER.map(function (d) {
+      return '<div class="preport-dimrow"><div class="preport-dimlabel">' + esc(DIMS[d].name) + '</div>' +
+        '<div class="preport-track"><div class="preport-fill" style="width:' + g.avg[d] + '%;background:' + colors[d] + '"></div></div>' +
+        '<div class="preport-val">' + g.avg[d] + '</div></div>';
+    }).join('');
+
+  var h = GI.health;
+  var glance = sec('Team at a glance',
+    '<p style="font-size:12px"><b>Cohesion</b> ' + h.cohesion + ' (' + esc(h.cohesionLabel) + ') · <b>Diversity</b> ' + h.diversity + ' (' + esc(h.diversityLabel) + ') · <b>Coverage</b> ' + esc(h.coverageLabel) + '.</p>' +
+    '<p style="font-size:12px"><b>Most aligned:</b> ' + esc(DIMS[g.aligned].name) + ' (variance ' + g.variance[g.aligned] + ') · <b>Most scattered:</b> ' + esc(DIMS[g.divergent].name) + ' (variance ' + g.variance[g.divergent] + ')</p>' +
+    '<p style="font-size:12px"><b>Strongest pairing:</b> ' + esc(g.best.a) + ' × ' + esc(g.best.b) + ' (' + g.best.score + ') · <b>Widest pairing:</b> ' + esc(g.worst.a) + ' × ' + esc(g.worst.b) + ' (' + g.worst.score + ')</p>');
+
+  var ST = GI.story;
+  var storyPDF = sec('The group in words', ST.summary.map(function (t) { return '<p style="font-size:12px">' + esc(t) + '</p>'; }).join('')) +
+    sec('Dimension by dimension', ST.dims.map(function (x) {
+      return '<p style="font-size:12px"><b>' + esc(DIMS[x.dim].name) + '</b> <i>(' + esc(x.stateLabel) + ')</i><br>' + esc(x.text) + '<br><span style="color:#777;font-size:11px">Why this label: ' + esc(x.rule) + '</span></p>';
+    }).join('')) +
+    sec('Each member, in words', ST.members.map(function (m) { return '<p style="font-size:12px"><b>' + esc(m.name) + '</b> \u2014 ' + esc(m.text) + '</p>'; }).join('')) +
+    sec('How this text was written', ST.method.map(function (t) { return '<p style="font-size:11.5px">' + esc(t) + '</p>'; }).join(''));
+
+  var heatRows = members.map(function (m) {
+    return '<tr><td style="padding:3px 8px 3px 0;font-size:12px">' + esc(m.name) + '</td>' + DIM_ORDER.map(function (d) { return '<td style="padding:3px 8px;text-align:center;font-size:12px">' + m.dims[d] + '</td>'; }).join('') + '</tr>';
+  }).join('');
+  var table = sec('Scores — everyone × 5 dimensions',
+    '<table style="border-collapse:collapse"><tr><th style="text-align:left;font-size:11px">Member</th>' + DIM_ORDER.map(function (d) { return '<th style="font-size:11px;padding:0 8px">' + d + '</th>'; }).join('') + '</tr>' + heatRows +
+    '<tr><td style="padding:3px 8px 3px 0;font-size:12px"><b>Group average</b></td>' + DIM_ORDER.map(function (d) { return '<td style="padding:3px 8px;text-align:center;font-size:12px"><b>' + g.avg[d] + '</b></td>'; }).join('') + '</tr></table>');
+
+  var cards = sec('Member profiles',
+    GI.cards.map(function (c) {
+      return '<p style="font-size:12px"><b>' + esc(c.name) + '</b> — ' + esc(c.role) + (c.archetype ? ' · ' + esc(c.archetype) : '') + '<br>' + esc(c.standout.text) +
+        (c.closest ? '<br>Closest match: ' + esc(c.closest.name) + ' (' + c.closest.score + ') · Widest gap: ' + esc(c.furthest.name) + ' (' + c.furthest.score + ')' : '') + '</p>';
+    }).join(''), true);
+
+  var insights = sec('Strengths', GI.strengths.length ? GI.strengths.map(function (x) { return li(x.dim, x.text); }).join('') : '<p style="font-size:12px">No single collective strength — the group sits near the middle on every dimension.</p>', true) +
+    sec('Blind spots', GI.blindSpots.length ? GI.blindSpots.map(function (x) { return li(x.dim, x.text); }).join('') : '<p style="font-size:12px">No strong collective blind spot.</p>') +
+    sec('Communication tips', GI.communication.map(function (x) { return li(x.dim, x.text); }).join('')) +
+    sec('Decision-making style',
+      li('R', 'Pace: ' + GI.decision.pace) + li('I', 'Authority: ' + GI.decision.authority) + li('P', 'Evidence: ' + GI.decision.evidence) + li('M', 'Follow-through: ' + GI.decision.followThrough) +
+      '<p style="font-size:12px">' + esc(GI.decision.format) + '</p>');
+
+  var hot = sec('Conflict hotspots',
+    (GI.hotspots.length ? GI.hotspots.map(function (x) {
+      return '<p style="font-size:12px"><b>' + esc(DIMS[x.dim].name) + '</b> — ' + esc(x.a.name) + ' (' + x.a.dims[x.dim] + ') and ' + esc(x.b.name) + ' (' + x.b.dims[x.dim] + ') are ' + x.gap + ' points apart.<br><i>' + esc(x.prompt) + '</i></p>';
+    }).join('') : '<p style="font-size:12px">No dimension shows a wide split.</p>') +
+    (GI.pairHotspots.length ? '<p style="font-size:12px"><b>Lowest-scoring pairs</b></p>' + GI.pairHotspots.map(function (p) {
+      return '<p style="font-size:12px">' + esc(p.a) + ' × ' + esc(p.b) + ' (' + p.score + ') — ' + esc(p.conflict.why) + (p.conflict.dim ? ' <b>A way through:</b> ' + esc(p.conflict.bridge) : '') + '</p>';
+    }).join('') : ''));
+
+  var matrix = sec('Pairwise matrix',
+    g.pairs.map(function (p) { return '<p style="font-size:12px">' + esc(p.a) + ' × ' + esc(p.b) + ' — ' + p.score + '</p>'; }).join(''), true);
+
+  var adv = PsychePolicy.groupAdvisory(members.length);
+  var footer = (adv.show ? '<div class="preport-footer"><p><b>Group size.</b> ' + esc(adv.text) + '</p><p>' + esc(PsychePolicy.USE_LIMITS) + '</p></div>' : '') + PsychePolicy.metaHTML(PsychePolicy.reportMeta(members[0], 'Group'), esc) + '<div class="preport-footer">Generated by Psyche Core — computed in your browser from the scores each member chose to share. Describes composition, not performance.</div>';
+
+  return header + glance + storyPDF + table + cards + insights + hot + plusReportGroup(members) + matrix + footer;
+}
+
+function fallbackCopy(text, onDone) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    onDone();
+  } catch (e) {
+    console.error('Copy failed:', e);
+  }
+}
+
+
+/* ---------------- COMPATIBILITY (1:1, through accounts) ---------------- */
+function compareResultHTML(mine, them, withExport) {
+  var result = '';
+    var c = Engine.compatibility(mine.dims, them.dims, mine.name, them.name);
+    var dc = Engine.deepCompatibility(mine.dims, them.dims, mine.name, them.name);
+    var offset = 326 - 326 * (c.score / 100);
+    var noteLegend = {
+      'Shared ground': 'a dimension you both score high on \u2014 easy, instinctive territory',
+      'Natural division': 'a wide gap on one dimension, framed as a possible complement rather than a clash',
+      'Watch: two centers': 'both of you score high on Identity \u2014 two firm centers of gravity in the same relationship',
+      'Watch: distance': 'both of you score low on Social \u2014 neither instinctively reaches out first',
+      'Watch: pace': 'a wide gap on Response \u2014 mismatched tempo, worth naming early',
+      'Quiet balance': 'nothing strongly stands out either way \u2014 not a bad sign, just a flatter profile'
+    };
+    var archNarrative = archPairNarrative(mine.key, them.key, mine.name, them.name);
+    result = '<div class="card mt18">' +
+      '<div class="eb">' + esc(mine.name) + (mine.key ? ' ' + archEmoji(mine.key) : '') + ' \u00d7 ' + esc(them.name) + (them.key ? ' ' + archEmoji(them.key) : '') + '</div>' +
+      '<div class="row center" style="justify-content:center;margin-top:14px"><div style="position:relative;width:130px;height:130px">' +
+        '<svg width="130" height="130" style="transform:rotate(-90deg)"><circle cx="65" cy="65" r="52" fill="none" stroke="var(--surf2)" stroke-width="10"/>' +
+        '<circle cx="65" cy="65" r="52" fill="none" stroke="var(--ink)" stroke-width="10" stroke-dasharray="326" stroke-dashoffset="' + offset + '" stroke-linecap="round"/></svg>' +
+        '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">' +
+        '<b style="font-size:26px">' + c.score + '</b><span style="font-size:12px;color:var(--faint)">similarity</span></div></div></div>' +
+      '<p class="sub mt10" style="font-size:12px;text-align:center;color:var(--faint)">Built from the average gap between your two profiles across all 5 dimensions, clipped to a 32\u201397 range \u2014 not a verdict on whether you should be together, just a measure of how numerically close the two profiles land. Full formula on the science page.</p>' +
+      '<p class="sub mt10" style="font-size:12.5px"><b>Similarity is not compatibility.</b> ' + esc(PsychePolicy.SIMILARITY_NOTE) + '</p>' +
+      '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Roughly: 80+ is a strong numeric match, 60\u201379 is solid, 45\u201359 is workable but needs attention, below 45 is a genuinely wide gap \u2014 read as a prompt for conversation, not a grade.</p>' +
+      '<div class="mt18" style="display:flex;justify-content:center">' + radarSVG(mine.dims, them.dims, mine.name, them.name) + '</div>' +
+      c.notes.map(function (n) {
+        return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">' + esc(n.t) + '</b>' +
+          '<p class="sub mt4" style="font-size:12px;color:var(--faint);font-style:italic">' + esc(noteLegend[n.t] || '') + '</p>' +
+          '<p class="sub mt6" style="font-size:13px">' + esc(n.p) + '</p></div>';
+      }).join('') +
+      '<p class="sub mt14" style="font-size:12px;color:var(--faint)">' + esc(c.synthesis) + '</p>' +
+    '</div>' +
+
+    (archNarrative ? '<div class="card mt14"><div class="eb">As archetypes</div>' +
+      '<p class="sub mt10" style="font-size:13px">' + esc(archNarrative) + '</p>' +
+    '</div>' : '') +
+
+    '<div class="card mt14">' +
+      '<div class="eb">Trait-by-trait \u2014 all 5 dimensions</div>' +
+      '<p class="sub mt8" style="font-size:12.5px">Where the headline score comes from, dimension by dimension. Each bar shows both of your scores side by side; the paragraph underneath is generated specifically for how the two of you land on that dimension \u2014 not a generic description of either score alone. "% aligned" is roughly 100 minus the gap between your two scores on that one dimension, so it\u2019s a per-trait number, not a slice of the overall compatibility score above.</p>' +
+      dc.dims.map(function (x) {
+        return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)">' +
+          '<div class="row between center"><b style="font-size:13px">' + esc(x.name) + '</b><span class="mono" style="font-size:12px;color:var(--faint)">' + x.harmony + '% aligned</span></div>' +
+          '<p class="sub" style="font-size:12px;color:var(--faint);margin-top:1px">' + esc(DIMS[x.dim].blurb) + '</p>' +
+          '<div class="mt8" style="position:relative;height:8px;background:var(--surf);border-radius:4px;overflow:hidden">' +
+            '<div style="position:absolute;left:0;top:0;bottom:0;width:' + x.aScore + '%;background:' + x.color + ';opacity:.55"></div>' +
+            '<div style="position:absolute;left:0;top:0;bottom:0;width:' + x.bScore + '%;background:' + x.color + ';opacity:.3;border-right:2px solid ' + x.color + '"></div>' +
+          '</div>' +
+          '<div class="row between" style="font-size:12px;color:var(--faint);margin-top:3px"><span>' + esc(mine.name) + ' ' + x.aScore + '</span><span>' + esc(them.name) + ' ' + x.bScore + '</span></div>' +
+          '<p class="sub mt8" style="font-size:12.5px">' + esc(x.text) + '</p>' +
+        '</div>';
+      }).join('') +
+      '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Most naturally aligned: <b style="color:var(--ink)">' + esc(dc.mostAligned.name) + '</b> (' + dc.mostAligned.harmony + '%). Widest gap: <b style="color:var(--ink)">' + esc(dc.mostDivergent.name) + '</b> (' + dc.mostDivergent.harmony + '%).</p>' +
+    '</div>' +
+
+    '<div class="card mt14"><div class="eb">Conflict style, between you two</div>' +
+      '<p class="sub mt8" style="font-size:12px;color:var(--faint)">This isolates the single dimension with the biggest gap between you \u2014 the one most likely to actually produce friction, as opposed to the five-dimension overview above, which covers all of them evenly. If no dimension has a meaningfully wide gap, that\u2019s stated plainly below rather than manufacturing a fault line that isn\u2019t really there.</p>' +
+      (c.conflict.dim
+        ? '<p class="sub mt10" style="font-size:13px">' + esc(c.conflict.why) + '</p><p class="sub mt10" style="font-size:12.5px"><b>A way through:</b> ' + esc(c.conflict.bridge) + '</p>'
+        : '<p class="sub mt10" style="font-size:13px">' + esc(c.conflict.why) + '</p><p class="sub mt10" style="font-size:12.5px">' + esc(c.conflict.bridge) + '</p>') +
+    '</div>' +
+    compatSocialPlusHTML(mine, them, c) +
+    (withExport ? '<button class="btn primary block mt14" data-act="sharecompat">Save as image to share</button><button class="btn ghost block mt10" data-act="exportcompatpdf">Export this comparison (PDF)</button>' : '') +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Curious how the score and the trait pairing above are actually computed, or what the note categories and lenses above mean? <button type="button" class="linkbtn inline" data-act="glossary">See the full glossary \u2192</button> or <button type="button" class="linkbtn inline" data-act="science" data-sci="compat">the scientific breakdown \u2192</button></p>';
+  return result + compatPlusHTML(mine, them);
+}
+
+function viewCompare() {
+  var mine = state.result ? { name: myName(), dims: state.result.dims, key: state.result.match.key, facets: state.result.facets } : null;
+  var gate = socialGate();
+  var them = null, socialHTML = '';
+  if (!gate) {
+    var L = connectionLists(), busy = state.socialBusy ? ' disabled' : '';
+    them = currentCompareThem();
+    var inviteMsg = function (email) {
+      return myName() + ' invited you on Psyche Core to compare personalities. Sign in at ' + siteUrl() + ' with this email (' + email + ') and accept the invite under Compatibility.';
+    };
+    var connectCard = state.result
+      ? '<div class="card mt14"><div class="eb">Connect with someone</div>' +
+          '<p class="sub mt8" style="font-size:12.5px">Nobody sees your scores until they accept. Once you’re connected you each see the other’s dimension and facet scores and archetype — never any answers. You can remove a connection any time.</p>' +
+          '<label class="field mt10"><span>Invite by email</span><input class="input" id="inviteEmail" type="email" inputmode="email" autocomplete="off" placeholder="friend@example.com" value="' + esc(state.inviteDraft) + '"></label>' +
+          '<button class="btn ghost block mt10" data-act="invitecompare"' + busy + '>Send invite</button>' +
+          '<p class="sub mt8" style="font-size:12px;color:var(--faint)">No email is sent automatically — they see the invite when they sign in with <b>that exact email</b>. Use “Copy invite message” below to send it yourself.</p>' +
+          '<div class="eb mt18">Or share a link</div>' +
+          '<p class="sub mt8" style="font-size:12.5px">A one-time link for one person that expires after 14 days. They open it, sign in (or sign up), confirm, and you’re connected. ' + esc(PsychePolicy.SCOPE_TEXT) + '</p>' +
+          '<button class="btn ghost block mt10" data-act="makelink"' + busy + '>Create a share link</button>' +
+        '</div>'
+      : '<div class="card mt14"><div class="eb">Connect with someone</div><p class="sub mt8" style="font-size:12.5px">Take the assessment first — you need your own scores before you can compare.</p><button class="btn primary block mt12" data-act="start">Take the PRISM test</button></div>';
+
+    var recvCard = L.received.length
+      ? '<div class="card mt14"><div class="eb">Invitations for you</div>' +
+          '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Accepting shares your scores and archetype with them (and theirs with you). ' + esc(PsychePolicy.SCOPE_TEXT) + '</p>' +
+          L.received.map(function (c) {
+            return '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><div style="font-size:13.5px;font-weight:600">' + esc(c.requester_name) + '</div>' +
+              '<div class="mono" style="font-size:12px;color:var(--faint);word-break:break-all">' + esc(c.requester_email) + '</div>' +
+              '<div class="row mt8" style="gap:8px"><button class="btn ghost" data-act="acceptconn" data-id="' + esc(c.id) + '"' + busy + '>Accept</button>' +
+              '<button class="linkbtn" data-act="removeconn" data-id="' + esc(c.id) + '" style="color:var(--S)">Decline</button></div></div>';
+          }).join('') + '</div>'
+      : '';
+
+    var sentCard = L.sent.length
+      ? '<div class="card mt14"><div class="eb">Waiting for a reply</div>' +
+          L.sent.map(function (c) {
+            var isLink = !c.invitee_email;
+            return '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><div style="font-size:13px">' + (isLink ? 'Share link (one person)' : 'Invited <b>' + esc(c.invitee_email) + '</b>') + '</div>' +
+              '<div class="row mt8" style="gap:10px;flex-wrap:wrap">' +
+              '<button class="btn ghost" data-act="copycode" data-code="' + esc(isLink ? siteUrl() + '?join=' + c.token : inviteMsg(c.invitee_email)) + '">' + (state.codeCopied ? 'Copied ✓' : (isLink ? 'Copy link' : 'Copy invite message')) + '</button>' +
+              '<button class="linkbtn" data-act="removeconn" data-id="' + esc(c.id) + '" style="color:var(--S)">Cancel</button></div></div>';
+          }).join('') + '</div>'
+      : '';
+
+    var connCard = L.accepted.length
+      ? '<div class="card mt14"><div class="eb">Your connections</div>' +
+          L.accepted.map(function (a) {
+            var sel = state.compareWith === a.id;
+            return '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><div class="row between center"><span style="font-size:13.5px;font-weight:600">' + esc(a.name) + (sel ? ' ✓' : '') + '</span>' +
+              '<button class="linkbtn" data-act="removeconn" data-id="' + esc(a.id) + '" data-confirm="1" style="color:var(--S)">Remove</button></div>' +
+              (a.person ? '<button class="btn ' + (sel ? 'primary' : 'ghost') + ' block mt8" data-act="comparewith" data-id="' + esc(a.id) + '">Compare with ' + esc(a.name) + '</button>'
+                        : '<p class="sub mt6" style="font-size:12px;color:var(--faint)">Hasn’t taken the test yet — you can compare once they have.</p>') + '</div>';
+          }).join('') + '</div>'
+      : '';
+    socialHTML = socialMsgBox() + recvCard + connectCard + sentCard + connCard;
+  }
+
+  var dimGuide = '<div class="card mt14"><div class="eb">What\u2019s being compared</div>' +
+    '<p class="sub mt8" style="font-size:12.5px">This isn\u2019t a vibe check \u2014 it\u2019s a direct comparison of the same 5 dimensions your own result is built from. A quick reminder of what each one actually measures, since the breakdown below refers back to these constantly:</p>' +
+    DIM_ORDER.map(function (d) {
+      return '<div class="row" style="margin-top:8px;gap:8px;align-items:baseline"><span style="width:8px;height:8px;border-radius:50%;background:' + DIMS[d].color + ';flex:none;transform:translateY(-1px)"></span>' +
+        '<span style="font-size:12.5px"><b>' + esc(DIMS[d].name) + '</b> \u2014 ' + esc(DIMS[d].blurb) + '</span></div>';
+    }).join('') +
+  '</div>' +
+  '<div class="card mt14"><div class="eb">Two lenses for reading this</div>' +
+    '<p class="sub mt8" style="font-size:12.5px">Personality psychology doesn\u2019t fully agree on whether similarity or difference predicts a better relationship, and this tool deliberately doesn\u2019t pick a side \u2014 it reports the gap and lets you interpret it.</p>' +
+    '<div class="mt10"><b style="font-size:13px">Similarity \u2192 ease</b><p class="sub mt4" style="font-size:12.5px">The similarity-attraction idea: shared traits mean shared instincts \u2014 less translation needed, fewer surprises, faster rapport. A high score leans on this.</p></div>' +
+    '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">Difference \u2192 range</b><p class="sub mt4" style="font-size:12.5px">The complementarity idea: two different profiles can cover more ground together than either could alone \u2014 one\u2019s gap is the other\u2019s strength. A lower score isn\u2019t automatically a worse match; it can mean a wider combined range, at the cost of needing more deliberate translation between you.</p></div>' +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">In practice most real pairs are a mix \u2014 aligned on some dimensions, split on others, which is exactly what the trait-by-trait section below is built to show rather than collapsing into one number.</p>' +
+  '</div>';
+
+  var result = (mine && them) ? compareResultHTML(mine, them, true) : '';
+
+  return topbar('Compatibility', 'home') +
+    '<div class="wrap">' +
+      '<div class="eb">Compatibility</div>' +
+      '<p class="sub mt8" style="font-size:13px">Connect with someone through their account \u2014 by email invite or a share link \u2014 and once they accept, the comparison runs right here from the scores you both chose to share.</p>' +
+      (gate || socialHTML) + result + dimGuide +
+      '<button class="btn ghost block mt24" data-act="home">Back home</button>' +
+    '</div>';
+}
+
+
+
+/* ---------------- ENGINE PLUS: facet-level views (individual, pair, group) ---------------- */
+var MK_A = 'var(--ink)', MK_B = 'var(--S)';
+function bandLabel(b) { return b === 'high' ? 'Strong' : b === 'low' ? 'Stretch' : 'Moderate'; }
+function plusNote(t) { return '<div class="card mt14"><p class="sub" style="font-size:12.5px">' + esc(t) + '</p></div>'; }
+function facetRowHTML(key, markers) {
+  var i = EnginePlus.facetInfo(key);
+  return '<div class="mt12"><div class="row between" style="font-size:12px;color:var(--faint)"><span>' + esc(i.lo[0]) + '</span><b style="font-size:12px;color:var(--ink)">' + esc(i.name) + '</b><span>' + esc(i.hi[0]) + '</span></div>' +
+    '<div style="position:relative;height:14px;margin-top:4px;background:var(--surf);border-radius:7px"><div style="position:absolute;left:50%;top:2px;bottom:2px;width:1px;background:var(--line)"></div>' +
+    markers.map(function (m) { return '<div title="' + esc(m.label + ' ' + m.v) + '" style="position:absolute;left:calc(' + m.v + '% - 6px);top:1px;width:12px;height:12px;border-radius:50%;background:' + m.color + ';border:1px solid var(--bg)"></div>'; }).join('') +
+    '</div></div>';
+}
+function facetMapHTML(markersFor) {
+  return DIM_ORDER.map(function (d) {
+    return '<div class="mt18"><div class="row center" style="gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:' + DIMS[d].color + '"></span><b style="font-size:13px">' + esc(DIMS[d].name) + '</b></div>' +
+      Object.keys(DIMS[d].facets).map(function (f) { return facetRowHTML(d + '.' + f, markersFor(d + '.' + f)); }).join('') + '</div>';
+  }).join('');
+}
+function scenBarHTML(title, score, band, text, dots, badge) {
+  return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:13px">' + esc(title) + (badge ? ' <span class="mono" style="font-size:9.5px;color:var(--faint);border:1px solid var(--line);border-radius:99px;padding:1px 6px;margin-left:4px">' + esc(badge) + '</span>' : '') + '</b>' +
+    '<span class="mono" style="font-size:12px;color:var(--faint)">' + bandLabel(band) + ' · ' + score + '</span></div>' +
+    '<div style="position:relative;height:10px;margin-top:6px;background:var(--surf);border-radius:5px"><div style="position:absolute;left:0;top:0;bottom:0;width:' + score + '%;background:var(--ink);opacity:.25;border-radius:5px"></div>' +
+    (dots || []).map(function (m) { return '<div title="' + esc(m.label + ' ' + m.v) + '" style="position:absolute;left:calc(' + m.v + '% - 6px);top:-1px;width:12px;height:12px;border-radius:50%;background:' + m.color + ';border:1px solid var(--bg)"></div>'; }).join('') + '</div>' +
+    '<p class="sub mt6" style="font-size:12.5px">' + esc(text) + '</p></div>';
+}
+function legendHTML(a, b) {
+  return '<div class="row center mt8" style="gap:16px;font-size:12px;color:var(--faint)"><span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + MK_A + ';margin-right:5px"></span>' + esc(a) + '</span>' +
+    (b ? '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + MK_B + ';margin-right:5px"></span>' + esc(b) + '</span>' : '') + '</div>';
+}
+
+/* ---------- Patterns: generated graphics (inline SVG drawn from the 20 facet scores; no libraries, no network) ---------- */
+var ZSYM = { high: '\u25B2', low: '\u25BC', mid: '\u25CF' };
+function r1(n) { return Math.round(n * 10) / 10; }
+
+/* Chart 1: all 20 traits on one scale. Stem runs from the centre (50) to the score; the shape of the marker
+   (up triangle / down triangle / hollow circle) carries the meaning, so nothing depends on colour alone. */
+function traitChartSVG(rows) {
+  var W = 360, X0 = 104, TW = 186, RH = 21, HH = 26, TOP = 18;
+  function X(v) { return r1(X0 + TW * v / 100); }
+  var dims = ['P', 'R', 'I', 'S', 'M'], y = TOP, g = '', guides = '', hiN = [], loN = [];
+  dims.forEach(function (d) {
+    var mine = rows.filter(function (t) { return t.dim === d; });
+    if (!mine.length) return;
+    var avg = Math.round(mine.reduce(function (a, t) { return a + t.score; }, 0) / mine.length);
+    g += '<text x="0" y="' + (y + 15) + '" font-size="11" font-weight="700" style="fill:' + mine[0].color + '">' + d + ' \u00B7 ' + esc(DIMS[d].name) + '</text>' +
+      '<text x="' + W + '" y="' + (y + 15) + '" font-size="10" text-anchor="end" class="mono" style="fill:var(--faint)">avg ' + avg + '</text>';
+    y += HH;
+    mine.forEach(function (t) {
+      var cy = y + RH / 2, x = X(t.score), c = t.color, s = '';
+      if (t.zone === 'high') hiN.push(t.name); else if (t.zone === 'low') loN.push(t.name);
+      s += '<rect x="' + X0 + '" y="' + (cy - 5) + '" width="' + TW + '" height="10" rx="5" style="fill:var(--surf2)"/>' +
+        '<rect x="' + X0 + '" y="' + (cy - 5) + '" width="' + r1(TW * 0.38) + '" height="10" rx="4" style="fill:' + c + ';opacity:.16"/>' +
+        '<rect x="' + X(62) + '" y="' + (cy - 5) + '" width="' + r1(TW * 0.38) + '" height="10" rx="4" style="fill:' + c + ';opacity:.16"/>' +
+        '<line x1="' + X(50) + '" y1="' + (cy - 5) + '" x2="' + X(50) + '" y2="' + (cy + 5) + '" style="stroke:var(--faint);opacity:.55" stroke-width="1"/>';
+      if (t.score !== 50) s += '<line x1="' + X(50) + '" y1="' + cy + '" x2="' + x + '" y2="' + cy + '" stroke-width="3" stroke-linecap="round" style="stroke:' + c + '"/>';
+      if (t.zone === 'high') s += '<polygon points="' + x + ',' + (cy - 7) + ' ' + r1(x - 6.5) + ',' + (cy + 5) + ' ' + r1(+x + 6.5) + ',' + (cy + 5) + '" style="fill:' + c + '"/>';
+      else if (t.zone === 'low') s += '<polygon points="' + x + ',' + (cy + 7) + ' ' + r1(x - 6.5) + ',' + (cy - 5) + ' ' + r1(+x + 6.5) + ',' + (cy - 5) + '" style="fill:' + c + '"/>';
+      else s += '<circle cx="' + x + '" cy="' + cy + '" r="5" stroke-width="2" style="fill:var(--surf);stroke:' + c + '"/>';
+      s += '<text x="0" y="' + (cy + 4) + '" font-size="11" ' + (t.zone === 'mid' ? '' : 'font-weight="600" ') + 'style="fill:var(--ink)">' + esc(t.name) + '</text>' +
+        '<text x="' + W + '" y="' + (cy + 4) + '" font-size="11" text-anchor="end" class="mono" ' + (t.zone === 'mid' ? '' : 'font-weight="700" ') + 'style="fill:' + (t.zone === 'mid' ? 'var(--faint)' : 'var(--ink)') + '">' + ZSYM[t.zone] + ' ' + t.score + '</text>';
+      g += s; y += RH;
+    });
+    y += 4;
+  });
+  var H = y;
+  guides = '<line x1="' + X(38) + '" y1="' + (TOP - 4) + '" x2="' + X(38) + '" y2="' + (H - 4) + '" stroke-dasharray="2 3" style="stroke:var(--faint);opacity:.5"/>' +
+    '<line x1="' + X(62) + '" y1="' + (TOP - 4) + '" x2="' + X(62) + '" y2="' + (H - 4) + '" stroke-dasharray="2 3" style="stroke:var(--faint);opacity:.5"/>' +
+    '<text x="' + X(19) + '" y="10" font-size="9" text-anchor="middle" class="mono" style="fill:var(--faint)">LOW \u2264 38</text>' +
+    '<text x="' + X(81) + '" y="10" font-size="9" text-anchor="middle" class="mono" style="fill:var(--faint)">HIGH \u2265 62</text>';
+  var label = 'Chart of all 20 trait scores from 0 to 100. ' + (hiN.length ? 'High: ' + hiN.join(', ') + '. ' : 'No trait is clearly high. ') + (loN.length ? 'Low: ' + loN.join(', ') + '. ' : 'No trait is clearly low. ') + 'The other traits sit in the balanced middle.';
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(label) + '" style="width:100%;height:auto;display:block">' + guides + g + '</svg>';
+}
+
+/* Chart 2: the 20 traits on a ring, with a line for every pattern (solid, numbered) and tension (dashed, T-numbered) that is active. */
+function patternWebSVG(rows, pats, tens, disc) {
+  var CX = 180, CY = 176, R = 108, LR = 133, PAL = ['#8B7CF6', '#2DB6A3', '#E8A23B', '#E5667A'];
+  var pos = {}, nodes = '', labels = '', lines = '', badges = '';
+  rows.forEach(function (t, i) {
+    var a = (-90 + i * 18) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+    pos[t.key] = { x: r1(CX + R * ca), y: r1(CY + R * sa) };
+    var p = pos[t.key], c = t.color;
+    if (t.zone === 'high') nodes += '<circle cx="' + p.x + '" cy="' + p.y + '" r="8" style="fill:' + c + '"/>';
+    else if (t.zone === 'low') nodes += '<circle cx="' + p.x + '" cy="' + p.y + '" r="7" stroke-width="2.5" style="fill:var(--surf);stroke:' + c + '"/>';
+    else nodes += '<circle cx="' + p.x + '" cy="' + p.y + '" r="3.5" style="fill:var(--faint)"/>';
+    var lx = r1(CX + LR * ca), ly = r1(CY + LR * sa + 3.5), anc = ca > 0.3 ? 'start' : ca < -0.3 ? 'end' : 'middle';
+    labels += '<text x="' + lx + '" y="' + ly + '" font-size="9.5" text-anchor="' + anc + '" class="mono" ' + (t.zone === 'mid' ? '' : 'font-weight="700" ') + 'style="fill:' + (t.zone === 'mid' ? 'var(--faint)' : 'var(--ink)') + '">' + t.code + (t.zone === 'mid' ? '' : ZSYM[t.zone]) + '</text>';
+  });
+  function curve(a, b, color, dash) {
+    var A = pos[a], B = pos[b], mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2, qx = r1(CX + (mx - CX) * 0.3), qy = r1(CY + (my - CY) * 0.3);
+    lines += '<path d="M' + A.x + ' ' + A.y + ' Q' + qx + ' ' + qy + ' ' + B.x + ' ' + B.y + '" fill="none" stroke-width="2" stroke-linecap="round"' + (dash ? ' stroke-dasharray="4 3"' : '') + ' style="stroke:' + color + ';opacity:.9"/>';
+    return { x: r1(0.25 * A.x + 0.5 * qx + 0.25 * B.x), y: r1(0.25 * A.y + 0.5 * qy + 0.25 * B.y) };
+  }
+  var placed = [];
+  function badge(p, text, color, hollow) {
+    var w = text.length > 1 ? 18 : 14, tries = [[0, 0], [0, -16], [0, 16], [-20, 0], [20, 0], [-20, -16], [20, 16], [0, -32], [0, 32]];
+    for (var ti = 0; ti < tries.length; ti++) {
+      var cand = { x: p.x + tries[ti][0], y: p.y + tries[ti][1] };
+      if (!placed.some(function (o) { return Math.abs(o.x - cand.x) < 19 && Math.abs(o.y - cand.y) < 15; })) { p = cand; break; }
+    }
+    placed.push(p);
+    badges += '<rect x="' + r1(p.x - w / 2) + '" y="' + (p.y - 7) + '" width="' + w + '" height="14" rx="7" stroke-width="1.5" style="fill:' + (hollow ? 'var(--surf)' : color) + ';stroke:' + color + '"/>' +
+      '<text x="' + p.x + '" y="' + (p.y + 3.5) + '" font-size="9" font-weight="700" text-anchor="middle" class="mono" style="fill:' + (hollow ? 'var(--ink)' : '#fff') + '">' + esc(text) + '</text>';
+  }
+  var P = pats.slice(0, 4), T = tens.slice(0, 4), D = (disc || []).slice(0, 2), DPAL = ['#6EA8FE', '#F59FD0', '#9BD36B'];
+  P.forEach(function (p, i) {
+    var ks = p.keys, col = PAL[i], at;
+    if (ks.length === 2) at = curve(ks[0], ks[1], col, false);
+    else { at = curve(ks[0], ks[1], col, false); curve(ks[1], ks[2], col, false); curve(ks[2], ks[0], col, false); }
+    badge(at, String(i + 1), col, false);
+  });
+  T.forEach(function (t, i) { badge(curve(t.keys[0], t.keys[1], 'var(--faint)', true), 'T' + (i + 1), 'var(--faint)', true); });
+  D.forEach(function (d, i) {
+    var ks = d.keys, col = DPAL[i], at, n0 = lines.length;
+    at = curve(ks[0], ks[1], col, false); if (ks.length === 3) { curve(ks[1], ks[2], col, false); curve(ks[2], ks[0], col, false); }
+    lines = lines.slice(0, n0) + lines.slice(n0).replace(/stroke-linecap="round"/g, 'stroke-linecap="round" stroke-dasharray="0.1 5" stroke-width="3"').replace(/ stroke-width="2"/g, '');
+    badge(at, 'A' + (i + 1), col, true);
+  });
+  var hi = rows.filter(function (t) { return t.zone === 'high'; }).length, lo = rows.filter(function (t) { return t.zone === 'low'; }).length;
+  var label = 'Ring of your 20 traits. ' + hi + ' are high, ' + lo + ' are low. ' + (P.length ? P.length + ' behaviour pattern' + (P.length === 1 ? '' : 's') + ' and ' : 'No behaviour patterns and ') + T.length + ' internal tension' + (T.length === 1 ? '' : 's') + (D.length ? ' and ' + D.length + ' auto-found combination' + (D.length === 1 ? '' : 's') : '') + ' are drawn as lines between traits; the list below the chart gives each one in text.';
+  var svg = '<svg viewBox="0 0 360 352" role="img" aria-label="' + esc(label) + '" style="width:100%;height:auto;display:block">' +
+    '<circle cx="' + CX + '" cy="' + CY + '" r="' + R + '" fill="none" stroke-dasharray="1 5" style="stroke:var(--line)"/>' + lines + nodes + badges + labels + '</svg>';
+  /* the same information as short notation, below the graphic */
+  function nt(k) { var t = rows.filter(function (x) { return x.key === k; })[0]; return t.code + ' ' + ZSYM[t.zone] + t.score; }
+  var list = P.map(function (p, i) {
+    return '<div class="mono" style="font-size:11.5px;margin-top:8px"><span style="color:' + PAL[i] + ';font-weight:700">' + (i + 1) + '</span> <b>' + esc(p.name) + '</b><br><span style="color:var(--faint)">' + p.keys.map(nt).join(' + ') + '</span></div>';
+  }).join('') + T.map(function (t, i) {
+    return '<div class="mono" style="font-size:11.5px;margin-top:8px"><span style="color:var(--faint);font-weight:700">T' + (i + 1) + '</span> <b>Tension</b><br><span style="color:var(--faint)">' + nt(t.keys[0]) + ' \u21C4 ' + nt(t.keys[1]) + '</span></div>';
+  }).join('');
+  list += D.map(function (d, i) {
+    return '<div class="mono" style="font-size:11.5px;margin-top:8px"><span style="color:' + DPAL[i] + ';font-weight:700">A' + (i + 1) + '</span> <b>' + esc(d.name) + '</b> <span style="color:var(--faint)">(auto-found)</span><br><span style="color:var(--faint)">' + d.keys.map(nt).join(' + ') + '</span></div>';
+  }).join('');
+  if (!list) list = '<p class="sub mt10" style="font-size:12.5px">No pattern or tension lines: your traits are fairly balanced, so there is nothing sharply defined to connect.</p>';
+  return svg + list;
+}
+function traitKeyHTML() {
+  return '<div class="mono" style="font-size:11px;color:var(--faint);margin-top:10px;line-height:1.7">' +
+    ZSYM.high + ' high (62+) &nbsp; ' + ZSYM.low + ' low (38 or less) &nbsp; ' + ZSYM.mid + ' balanced<br>Bar runs from the centre (50) to your score.</div>';
+}
+
+/* ---------- Trait lab (Patterns tab): what-if sliders, 20 x 20 interaction heatmap, trait drill-down ----------
+   Everything is computed in this browser from the scores on screen. Lab state is never saved or sent anywhere. */
+var HM_SYN = '#3b82f6', HM_OPP = '#e8833a';
+function labState(r) {
+  var sig = JSON.stringify(r.facets);
+  if (!state.lab || state.lab.sig !== sig) state.lab = { sig: sig, edits: {}, dim: 'P', sel: null, pair: null, w: null };
+  return state.lab;
+}
+function labCompute(r) {
+  var L = labState(r);
+  L.w = EnginePlus.whatIf(r.facets, L.edits);
+  return L;
+}
+function labTraitName(k) { return EnginePlus.facetInfo(k).name; }
+function labSlidersHTML(r, L) {
+  var keys = EnginePlus.facetKeys().filter(function (k) { return k.charAt(0) === L.dim; });
+  var dimBtns = segHTML(['P', 'R', 'I', 'S', 'M'].map(function (d) { return [d, d + ' \u00B7 ' + DIMS[d].name]; }), L.dim, 'labdim', 'data-lab-dim', 'Dimension to adjust');
+  return dimBtns.replace(/data-act="labdim"/g, 'data-lab="dim"') + keys.map(function (k) {
+    var i = EnginePlus.facetInfo(k), base = Math.round(r.facets[k]), cur = L.w ? Math.round(L.w.facets[k]) : base, ch = cur !== base;
+    return '<div class="mt14"><div class="row between center" style="gap:8px"><button type="button" class="tl-name" data-lab="open" data-k="' + k + '" aria-label="' + esc(i.name + ' \u2014 open details') + '">' + esc(i.name) + ' <span aria-hidden="true">\u203A</span></button>' +
+      '<span class="mono" style="font-size:12.5px" id="tl-val-' + k.replace('.', '-') + '">' + cur + (ch ? ' <span style="color:var(--faint)">(was ' + base + ')</span>' : '') + '</span></div>' +
+      '<input type="range" class="tl-range" min="0" max="100" step="1" value="' + cur + '" data-lab="range" data-k="' + k + '" aria-label="' + esc(i.name + ' score, 0 to 100. Low end: ' + i.lo[0] + '. High end: ' + i.hi[0]) + '">' +
+      '<div class="row between" style="font-size:11.5px;color:var(--faint)"><span>' + esc(i.lo[0]) + '</span><span>' + esc(i.hi[0]) + '</span></div></div>';
+  }).join('');
+}
+function labDiffList(title, g, l, nameOf) {
+  if (!g.length && !l.length) return '';
+  return '<div class="mt12"><b style="font-size:13px">' + esc(title) + '</b>' +
+    g.map(function (x) { return '<div class="sub mt4" style="font-size:12.5px"><b>+ New:</b> ' + esc(nameOf(x)) + '</div>'; }).join('') +
+    l.map(function (x) { return '<div class="sub mt4" style="font-size:12.5px"><b>\u2212 Gone:</b> ' + esc(nameOf(x)) + '</div>'; }).join('') + '</div>';
+}
+function labOutHTML(r, L) {
+  var W = L.w, n = W.changed.length;
+  if (!n) return '<p class="sub mt12" style="font-size:12.5px">Nothing changed yet. Move a slider and the chart, situations and patterns below update straight away. Your real result is never altered.</p>' + traitChartSVG(W.rows) + traitKeyHTML();
+  var moved = W.scenarios.filter(function (s) { return s.delta !== 0; });
+  var sc = moved.length ? moved.map(function (s) {
+    return '<div class="row between" style="gap:8px;margin-top:6px;font-size:12.5px"><span>' + esc(s.title) + '</span><span class="mono" style="white-space:nowrap">' + s.before + ' \u2192 ' + s.after + ' (' + (s.delta > 0 ? '+' : '\u2212') + Math.abs(s.delta) + ')' + (s.band !== s.bandBefore ? ' \u00B7 ' + esc(bandLabel(s.band)) : '') + '</span></div>';
+  }).join('') : '<p class="sub mt4" style="font-size:12.5px">No situation score moves with these changes.</p>';
+  var any = W.patterns.gained.length + W.patterns.lost.length + W.tensions.gained.length + W.tensions.lost.length + W.discovered.gained.length + W.discovered.lost.length;
+  return '<div class="mt12"><b style="font-size:13px">' + n + (n === 1 ? ' trait' : ' traits') + ' changed in the lab</b>' + sc + '</div>' +
+    labDiffList('Behaviour patterns', W.patterns.gained, W.patterns.lost, function (p) { return p.name; }) +
+    labDiffList('Internal tensions', W.tensions.gained, W.tensions.lost, function (t) { return t.a + ' / ' + t.b; }) +
+    labDiffList('Auto-found combinations', W.discovered.gained, W.discovered.lost, function (d) { return d.notation; }) +
+    (any ? '' : '<p class="sub mt12" style="font-size:12.5px">No pattern or tension appears or disappears with these changes.</p>') +
+    '<div class="mt14">' + traitChartSVG(W.rows) + traitKeyHTML() + '</div>';
+}
+function labCardHTML(r, L) {
+  return '<div class="card mt14"><div class="eb">What-if lab</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Change trait scores to see how your situations and patterns would shift. This is a thought experiment on fixed rules, not a prediction of how you would change.</p>' +
+    '<div id="tl-sliders">' + labSlidersHTML(r, L) + '</div>' +
+    '<div class="row mt14" style="gap:8px"><button type="button" class="btn ghost" data-lab="reset" id="tl-reset"' + (L.w.changed.length ? '' : ' disabled') + '>Reset to my scores</button></div>' +
+    '<div id="tl-out" aria-live="polite">' + labOutHTML(r, L) + '</div></div>';
+}
+
+/* Heatmap: one cell per pair. Blue = the two traits push the same situations the same way; orange = they push opposite ways. */
+function heatmapSVG(M, sel, pair) {
+  var X0 = 38, Y0 = 40, C = 15, n = M.keys.length, W = X0 + C * n + 2, H = Y0 + C * n + 2, g = '', i, j;
+  M.keys.forEach(function (k, a) {
+    var code = EnginePlus.SHORT[k], bold = k === sel ? ' font-weight="700"' : '';
+    g += '<text x="' + (X0 - 3) + '" y="' + (Y0 + a * C + 11) + '" font-size="10" text-anchor="end" class="mono"' + bold + ' style="fill:var(--ink)">' + code + '</text>' +
+      '<text transform="translate(' + (X0 + a * C + 11) + ',' + (Y0 - 3) + ') rotate(-90)" font-size="10" class="mono"' + bold + ' style="fill:var(--ink)">' + code + '</text>';
+  });
+  for (i = 0; i < n; i++) for (j = 0; j < n; j++) {
+    var x = X0 + j * C, y = Y0 + i * C, c = M.cells[i][j], fill, op = 1, mark = '', edge = false;
+    if (i === j) { fill = EnginePlus.facetInfo(M.keys[i]).color; op = 0.35; }
+    else if (!c.linked) { fill = 'var(--surf2)'; op = 0.6; }
+    else if (Math.abs(c.value) < 0.05) { fill = 'var(--surf2)'; op = 1; edge = true; }
+    else { fill = c.value > 0 ? HM_SYN : HM_OPP; op = Math.round((0.18 + 0.72 * Math.min(1, Math.abs(c.value))) * 100) / 100; }
+    g += '<rect x="' + (x + 0.5) + '" y="' + (y + 0.5) + '" width="' + (C - 1) + '" height="' + (C - 1) + '" rx="2" style="fill:' + fill + ';opacity:' + op + (edge ? ';stroke:var(--faint);stroke-width:1' : '') + '"/>';
+    if (c && c.linked && Math.abs(c.value) >= 0.3) {
+      var cx = x + C / 2, cy = y + C / 2;
+      mark = '<path d="M' + (cx - 3) + ' ' + cy + 'H' + (cx + 3) + (c.value > 0 ? 'M' + cx + ' ' + (cy - 3) + 'V' + (cy + 3) : '') + '" stroke-width="1.6" fill="none" style="stroke:var(--ink)"/>';
+      g += mark;
+    }
+    if (c && c.ruleOn) g += '<rect x="' + (x + 2) + '" y="' + (y + 2) + '" width="' + (C - 4) + '" height="' + (C - 4) + '" rx="1" fill="none" stroke-width="1" style="stroke:var(--ink)"/>';
+  }
+  for (i = 1; i < 5; i++) g += '<line x1="' + (X0 + i * 4 * C) + '" y1="' + Y0 + '" x2="' + (X0 + i * 4 * C) + '" y2="' + (Y0 + n * C) + '" stroke-width="1" style="stroke:var(--faint);opacity:.6"/><line x1="' + X0 + '" y1="' + (Y0 + i * 4 * C) + '" x2="' + (X0 + n * C) + '" y2="' + (Y0 + i * 4 * C) + '" stroke-width="1" style="stroke:var(--faint);opacity:.6"/>';
+  var si = sel ? M.keys.indexOf(sel) : -1;
+  if (si >= 0) g += '<rect x="' + X0 + '" y="' + (Y0 + si * C) + '" width="' + (C * n) + '" height="' + C + '" fill="none" stroke-width="1.5" style="stroke:var(--ink)"/><rect x="' + (X0 + si * C) + '" y="' + Y0 + '" width="' + C + '" height="' + (C * n) + '" fill="none" stroke-width="1.5" style="stroke:var(--ink)"/>';
+  if (pair) { var pa = M.keys.indexOf(pair[0]), pb = M.keys.indexOf(pair[1]); if (pa >= 0 && pb >= 0) g += '<rect x="' + (X0 + pb * C - 1) + '" y="' + (Y0 + pa * C - 1) + '" width="' + (C + 2) + '" height="' + (C + 2) + '" fill="none" stroke-width="2.5" style="stroke:var(--ink)"/>'; }
+  var top = [];
+  M.keys.forEach(function (a, p) { M.keys.forEach(function (b, q) { if (q > p && M.cells[p][q].linked) top.push(M.cells[p][q]); }); });
+  var syn = top.filter(function (c) { return c.value >= 0.3; }).length, opp = top.filter(function (c) { return c.value <= -0.3; }).length;
+  var label = '20 by 20 grid of how pairs of traits act together. ' + syn + ' pairs clearly reinforce each other and ' + opp + ' clearly pull against each other. ' + (M.totalPairs - M.linkedPairs) + ' of ' + M.totalPairs + ' pairs have no rule linking them. Use the trait buttons below the grid for the details.';
+  return '<svg data-hm="1" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(label) + '" style="width:100%;height:auto;display:block;touch-action:manipulation">' + g + '</svg>';
+}
+function heatmapCardHTML(r, L, M) {
+  var chips = M.keys.map(function (k) {
+    var on = L.sel === k;
+    return '<button type="button" class="tl-chip" data-lab="open" data-k="' + k + '" aria-pressed="' + (on ? 'true' : 'false') + '" aria-label="' + esc(labTraitName(k) + ' \u2014 open details') + '">' + EnginePlus.SHORT[k] + '</button>';
+  }).join('');
+  var key = '<div class="mono" style="font-size:11px;color:var(--faint);margin-top:10px;line-height:1.8"><span style="display:inline-block;width:10px;height:10px;background:' + HM_SYN + ';margin-right:4px"></span>+ reinforce &nbsp; <span style="display:inline-block;width:10px;height:10px;background:' + HM_OPP + ';margin-right:4px"></span>\u2212 pull against &nbsp; \u25A1 listed tension active<br>Pale grey: no rule links this pair, which does not mean the two are unrelated. Outlined grey: linked by a rule or a named pattern, but with little push either way at these scores.</div>';
+  return '<div class="card mt14"><div class="eb">Interaction heatmap \u2014 20 \u00D7 20</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Where two traits feed the same everyday situation, do they push it the same way or opposite ways given your scores? Built from this app\u2019s own situation weights and tension list, not from outside data. ' + (L.w.changed.length ? 'It uses your what-if scores from the lab.' : '') + '</p>' +
+    '<div class="mt10" id="tl-hm">' + heatmapSVG(M, L.sel, L.pair) + '</div>' + key +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">' + M.linkedPairs + ' of ' + M.totalPairs + ' pairs are linked by the rules. Tap a cell, or a trait below, to see why.</p>' +
+    '<div class="tl-chips mt8" role="group" aria-label="Choose a trait">' + chips + '</div></div>';
+}
+
+/* Drill-down for one trait (and, if a heatmap cell was tapped, for that pair). */
+function labPairHTML(L, M) {
+  if (!L.pair) return '';
+  var c = EnginePlus.pairLink(L.w.facets, L.pair[0], L.pair[1]), a = labTraitName(c.a), b = labTraitName(c.b);
+  var verdict = !c.linked ? 'No rule in this app links these two traits, so it says nothing about how they act together.'
+    : (!c.via.length && !c.ruleText) ? 'They appear together in a named pattern, but share no everyday situation in the rules, so no push or pull is scored for them.'
+    : c.ruleOn ? 'A listed tension is active for this pair: ' + c.ruleText
+    : Math.abs(c.value) < 0.05 ? 'They share situations, but at your scores neither pushes strongly, so the effect is small.'
+    : c.value > 0 ? 'At your scores they push the same situations the same way, so each strengthens the other\u2019s effect.' : 'At your scores they push the same situations opposite ways, so one softens the other\u2019s effect.';
+  var via = c.via.filter(function (v) { return v.kind !== 'neutral'; }).map(function (v) { return v.title + (v.kind === 'reinforce' ? ' (+)' : ' (\u2212)'); }).join(', ');
+  var pats = c.patterns.map(function (p) { return p.name + (p.active ? ' (active)' : ''); }).join(', ');
+  return '<div style="padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-top:12px"><b style="font-size:13px">' + esc(a) + ' \u00D7 ' + esc(b) + '</b>' +
+    '<p class="sub mt4" style="font-size:12.5px">' + esc(verdict) + '</p>' + (via ? '<p class="sub mt4" style="font-size:12px;color:var(--faint)">Shared situations: ' + esc(via) + '</p>' : '') +
+    (pats ? '<p class="sub mt4" style="font-size:12px;color:var(--faint)">Named patterns using both: ' + esc(pats) + '</p>' : '') + '</div>';
+}
+function labLinkRow(f, x, sign) {
+  var via = x.link.via.filter(function (v) { return v.kind === (sign > 0 ? 'reinforce' : 'oppose'); }).map(function (v) { return v.title; }).slice(0, 2).join(', ');
+  return '<div class="mt6" style="font-size:12.5px"><button type="button" class="tl-name" data-lab="pair" data-a="' + x.link.a + '" data-b="' + x.other + '">' + esc(labTraitName(x.other)) + ' <span aria-hidden="true">\u203A</span></button><span class="sub" style="font-size:12px;color:var(--faint)"> ' + (via ? 'in ' + esc(via) : '') + '</span></div>';
+}
+function labDetailHTML(r, L, M) {
+  if (!L.sel) return '<p class="sub mt8" style="font-size:12.5px">Tap a trait (a slider name above, a cell in the heatmap, or a trait button) to see what sits behind it.</p>';
+  var D = EnginePlus.traitDetail(L.w.facets, L.sel, r.ans), real = Math.round(r.facets[L.sel]), edited = D.score !== real;
+  var pole = D.pole ? '<p class="sub mt6" style="font-size:12.5px"><b>' + esc(D.pole.name) + ':</b> ' + esc(D.pole.desc) + '</p>' : '<p class="sub mt6" style="font-size:12.5px">In the balanced middle: you can lean either way, \u201C' + esc(D.lo[0]) + '\u201D or \u201C' + esc(D.hi[0]) + '\u201D, depending on the situation.</p>';
+  var qs = D.questions.map(function (q) {
+    return '<div class="mt8" style="font-size:12.5px">\u201C' + esc(q.text) + '\u201D<br><span class="mono" style="font-size:12px;color:var(--faint)">' + (q.answer == null ? 'answer not stored on this device' : 'You: ' + esc(q.answerWord) + ' \u00B7 ' + (q.shift === 0 ? 'no shift' : (q.shift > 0 ? '+' : '\u2212') + Math.abs(q.shift) + ' points toward ' + (q.shift > 0 ? esc(D.hi[0]) : esc(D.lo[0])))) + '</span></div>';
+  }).join('');
+  var why = '<div class="mt14"><b style="font-size:13px">Why this score</b><p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(D.formula) + '</p>' + qs +
+    (D.haveAnswers ? '' : '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Your answers are not stored with this result (older result or cleared on this device). The score itself still stands.</p>') +
+    (edited ? '<p class="sub mt8" style="font-size:12px"><b>Lab note:</b> your real score is ' + real + '; the lab is showing ' + D.score + '. The answers above are your real ones.</p>' : '') + '</div>';
+  var sc = '<div class="mt14"><b style="font-size:13px">Where it matters</b>' + D.scenarios.map(function (s) {
+    return '<div class="row between" style="gap:8px;margin-top:6px;font-size:12.5px"><span>' + esc(s.title) + ' <span style="color:var(--faint)">\u00B7 ' + (s.effect === 'raises' ? 'higher helps' : 'higher lowers it') + '</span></span><span class="mono" style="color:var(--faint);white-space:nowrap">' + esc(s.now) + '</span></div>';
+  }).join('') + '</div>';
+  var pt = D.patterns.concat(D.tensions.map(function (t) { return { name: 'Tension: ' + t.keys.map(labTraitName).join(' / '), active: t.active }; }));
+  var pats = pt.length ? '<div class="mt14"><b style="font-size:13px">Patterns and tensions it belongs to</b>' + pt.map(function (p) { return '<div class="mt6" style="font-size:12.5px">' + esc(p.name) + ' <span class="mono" style="font-size:12px;color:var(--faint)">' + (p.active ? '\u00B7 active for you' : '\u00B7 not active') + '</span></div>'; }).join('') + '</div>' : '';
+  var disc = D.discovered.length ? '<div class="mt14"><b style="font-size:13px">Auto-found combinations with it</b>' + D.discovered.map(function (d) { return '<div class="mt6 mono" style="font-size:12px;color:var(--faint)">' + esc(d.notation) + '</div>'; }).join('') + '</div>' : '';
+  var lk = D.links.reinforce.length || D.links.oppose.length
+    ? '<div class="mt14"><b style="font-size:13px">Works with</b>' + (D.links.reinforce.length ? D.links.reinforce.map(function (x) { return labLinkRow(r.facets, x, 1); }).join('') : '<p class="sub mt4" style="font-size:12px;color:var(--faint)">No clear reinforcing partner at these scores.</p>') +
+      '<div class="mt10"><b style="font-size:13px">Pulls against</b></div>' + (D.links.oppose.length ? D.links.oppose.map(function (x) { return labLinkRow(r.facets, x, -1); }).join('') : '<p class="sub mt4" style="font-size:12px;color:var(--faint)">No clear opposing partner at these scores.</p>') + '</div>' : '';
+  return '<div class="row between center mt8" style="gap:8px"><b id="tl-title" tabindex="-1" style="font-size:15px;color:' + D.color + '">' + esc(D.name) + ' <span class="mono" style="font-size:13px;color:var(--ink)">' + D.code + ' ' + ZSYM[D.zone] + ' ' + D.score + '</span></b>' +
+    '<button type="button" class="btn ghost" data-lab="close" style="min-height:44px">Close</button></div>' + pole + labPairHTML(L, M) + why + sc + pats + disc + lk;
+}
+function labDetailCardHTML(r, L, M) {
+  return '<div class="card mt14" id="tl-td" role="region" aria-label="Trait drill-down"><div class="eb">Trait drill-down</div><div id="tl-detail">' + labDetailHTML(r, L, M) + '</div></div>';
+}
+function traitLabHTML(r) {
+  var L = labCompute(r), M = EnginePlus.interactions(L.w.facets);
+  return '<div id="lab-root">' + labCardHTML(r, L) + heatmapCardHTML(r, L, M) + labDetailCardHTML(r, L, M) + '</div>';
+}
+
+function wireLab() {
+  var root = document.getElementById('lab-root');
+  if (!root || !state.result) return;
+  var r = state.result, raf = null;
+  function refreshOut(full) {
+    var L = labCompute(r), M = EnginePlus.interactions(L.w.facets);
+    var o = document.getElementById('tl-out'); if (o) o.innerHTML = labOutHTML(r, L);
+    var hm = document.getElementById('tl-hm'); if (hm) hm.innerHTML = heatmapSVG(M, L.sel, L.pair);
+    var td = document.getElementById('tl-detail'); if (td) td.innerHTML = labDetailHTML(r, L, M);
+    var rs = document.getElementById('tl-reset'); if (rs) rs.disabled = !L.w.changed.length;
+    root.querySelectorAll('.tl-chip').forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-k') === L.sel ? 'true' : 'false'); });
+    if (full) { var s = document.getElementById('tl-sliders'); if (s) s.innerHTML = labSlidersHTML(r, L); }
+  }
+  root.addEventListener('input', function (e) {
+    var t = e.target; if (!t || t.getAttribute('data-lab') !== 'range') return;
+    var k = t.getAttribute('data-k'), L = labState(r), v = +t.value;
+    if (v === Math.round(r.facets[k])) delete L.edits[k]; else L.edits[k] = v;
+    var base = Math.round(r.facets[k]), out = document.getElementById('tl-val-' + k.replace('.', '-'));
+    if (out) out.innerHTML = v + (v !== base ? ' <span style="color:var(--faint)">(was ' + base + ')</span>' : '');
+    if (raf) return;
+    raf = (window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); })(function () { raf = null; refreshOut(false); });
+  });
+  function openTrait(k, pair, scroll) {
+    var L = labState(r); L.sel = k; L.pair = pair || null; refreshOut(false);
+    if (scroll) { var td = document.getElementById('tl-td'); if (td && td.scrollIntoView) { var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; td.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' }); } var h = document.getElementById('tl-title'); if (h) h.focus({ preventScroll: true }); }
+  }
+  root.addEventListener('click', function (e) {
+    var svg = e.target.closest && e.target.closest('svg[data-hm]');
+    if (svg) {
+      var box = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal, sx = vb.width / box.width, x = (e.clientX - box.left) * sx, y = (e.clientY - box.top) * sx;
+      var j = Math.floor((x - 38) / 15), i = Math.floor((y - 40) / 15), keys = EnginePlus.facetKeys();
+      if (i >= 0 && j >= 0 && i < 20 && j < 20) { if (i === j) openTrait(keys[i], null, false); else openTrait(keys[i], [keys[i], keys[j]], false); }
+      return;
+    }
+    var b = e.target.closest && e.target.closest('[data-lab]'); if (!b || b.getAttribute('data-lab') === 'range') return;
+    var act = b.getAttribute('data-lab'), L = labState(r);
+    if (act === 'open') openTrait(b.getAttribute('data-k'), null, b.classList.contains('tl-name'));
+    else if (act === 'pair') openTrait(b.getAttribute('data-a'), [b.getAttribute('data-a'), b.getAttribute('data-b')], false);
+    else if (act === 'close') { L.sel = null; L.pair = null; refreshOut(false); }
+    else if (act === 'reset') { L.edits = {}; refreshOut(true); }
+    else if (act === 'dim') { L.dim = b.getAttribute('data-lab-dim'); var s = document.getElementById('tl-sliders'); if (s) { s.innerHTML = labSlidersHTML(r, labCompute(r)); var nb = s.querySelector('[data-lab-dim="' + L.dim + '"]'); if (nb) nb.focus(); } }
+  });
+}
+
+/* Individual: patterns, tensions, scenarios, growth plan, facet map */
+function resultsPlus(r) {
+  if (!EnginePlus.validFacets(r.facets)) return plusNote('Facet-level analysis needs the full facet scores — retake the assessment to unlock it.');
+  var IND = EnginePlus.individual(r.facets);
+  var card = function (title, note, body) { return '<div class="card mt14"><div class="eb">' + esc(title) + '</div>' + (note ? '<p class="sub mt8" style="font-size:12px;color:var(--faint)">' + esc(note) + '</p>' : '') + body + '</div>'; };
+  var pats = IND.patterns.length
+    ? IND.patterns.slice(0, 4).map(function (p) {
+        return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13.5px">' + esc(p.name) + '</b><p class="sub mt4" style="font-size:12.5px">' + esc(p.text) + '</p>' +
+          '<p class="sub mt4" style="font-size:12px"><b>Watch for:</b> ' + esc(p.watch) + ' <b>Try:</b> ' + esc(p.tip) + '</p></div>';
+      }).join('')
+    : '<p class="sub mt10" style="font-size:12.5px">No sharply defined combination stands out — your facets are fairly balanced, which means you flex across situations rather than following one strong pattern.</p>';
+  var tens = IND.tensions.length
+    ? IND.tensions.map(function (t) {
+        return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><div class="mono" style="font-size:12px;color:var(--faint)">' + esc(t.a) + ' · ' + esc(t.b) + '</div><p class="sub mt4" style="font-size:12.5px">' + esc(t.text) + '</p><p class="sub mt4" style="font-size:12px"><b>Try:</b> ' + esc(t.tip) + '</p></div>';
+      }).join('')
+    : '<p class="sub mt10" style="font-size:12.5px">No facets pull sharply against each other in your profile — your traits point in broadly the same direction.</p>';
+  var scen = IND.scenarios.map(function (s) { return scenBarHTML(s.title, s.score, s.band, s.text); }).join('');
+  var steps = function (list, label) { return list.map(function (g, i) { return '<div class="mt10"><b style="font-size:13px">' + (i + 1) + '. ' + esc(g.title) + '</b> <span class="mono" style="font-size:12px;color:var(--faint)">' + g.score + '</span><p class="sub mt4" style="font-size:12.5px">' + esc(g.step) + '</p></div>'; }).join(''); };
+  var map = '<div class="mt8">' + legendHTML('You') + facetMapHTML(function (k) { return [{ v: r.facets[k], color: MK_A, label: 'You' }]; }) + '</div>';
+  var ROWS = EnginePlus.traitRows(r.facets), DISC = EnginePlus.discover(r.facets, IND.patterns);
+  var found = DISC.length ? DISC.map(function (d, i) {
+    return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><div class="mono" style="font-size:12px;color:var(--faint)">A' + (i + 1) + ' \u00B7 ' + esc(d.notation) + '</div><b style="font-size:13.5px">' + esc(d.name) + '</b> <span class="mono" style="font-size:11.5px;color:var(--faint)">' + esc(d.strength.label) + (d.borderline ? ' \u00B7 borderline' : '') + '</span><p class="sub mt4" style="font-size:12.5px">' + esc(d.text) + '</p></div>';
+  }).join('') + '<p class="sub mt12" style="font-size:12px;color:var(--faint)">' + esc(DISC[0].why) + '</p>' : '<p class="sub mt10" style="font-size:12.5px">No further combination stands out beyond the named patterns above.</p>';
+  return card('Trait chart \u2014 20 traits at a glance', 'Drawn fresh from your scores, 0\u2013100.', traitChartSVG(ROWS) + traitKeyHTML()) +
+    traitLabHTML(r) +
+    card('Pattern web', 'Numbered lines join the traits behind each behaviour pattern; dashed T-lines join the tensions.', patternWebSVG(ROWS, IND.patterns, IND.tensions, DISC)) +
+    card('Behaviour patterns', 'Named combinations of your facets — only shown when several facets line up.', pats) +
+    card('Auto-found combinations', 'Found by an algorithm that scans combinations of your clearly high and low traits \u2014 not a trained model. Hypotheses to check, not conclusions.', found) +
+    card('Internal tensions', 'Pairs of facets that pull in opposite directions inside you.', tens) +
+    card('How you handle 8 situations', 'Each bar combines the facets that matter for that situation (0–100). Stretch is not weakness — it marks where practice pays most.', scen) +
+    card('Your growth plan', 'One small step for each of your three biggest stretches.', steps(IND.growth)) +
+    card('Leverage your strengths', 'Where your profile gives you an edge — and how to use it.', steps(IND.leverage)) +
+    card('Facet map — all 20 traits', 'Each dot is your score between the two poles of that facet.', map) +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Generated by fixed rules from your 20 facet scores. It describes tendencies from a self-report, not diagnosis or a prediction of behaviour.</p>';
+}
+
+/* Pair: lens, facet-by-facet, scenarios together, conversation starters */
+function spCard(title, note, body) {
+  return '<div class="card mt14"><div class="eb">' + esc(title) + '</div>' + (note ? '<p class="sub mt8" style="font-size:13px">' + esc(note) + '</p>' : '') + body + '</div>';
+}
+function spItem(color, html) {
+  return '<div class="row" style="gap:10px;align-items:baseline;margin-top:12px"><span class="pdot" style="background:' + color + ';flex:none;transform:translateY(-1px)"></span><div style="font-size:14px;line-height:1.55">' + html + '</div></div>';
+}
+function compatSocialPlusHTML(mine, them, c) {
+  var T = SocialPlus.talk(mine, them), W = SocialPlus.swap(mine, them), E = SocialPlus.evolve(mine, them, c.score);
+  var talkBody = T.items.length
+    ? T.items.map(function (x) {
+        return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px;color:' + x.color + '">' + esc(x.name) + '</b>' +
+          '<p class="sub mt4" style="font-size:13px">' + esc(x.head) + '</p>' +
+          spItem(x.color, '<b>' + esc(x.forHi.who) + ':</b> ' + esc(x.forHi.text)) +
+          spItem(x.color, '<b>' + esc(x.forLo.who) + ':</b> ' + esc(x.forLo.text)) + '</div>';
+      }).join('')
+    : '<p class="sub mt10" style="font-size:14px">No dimension has a wide enough gap to need special handling. You already communicate in much the same way.</p>';
+  var shared = T.shared.length
+    ? '<p class="sub mt14" style="font-size:13px"><b style="color:var(--ink)">Already in sync on:</b> ' + T.shared.map(function (x) { return esc(x.name) + ' (' + esc(x.tag.toLowerCase()) + ')'; }).join(', ') + '.</p>' : '';
+  var fb = T.feedback.map(function (f) { return spItem('var(--faint)', esc(f.text)); }).join('');
+  var swapBody = W.length
+    ? W.map(function (x) {
+        return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px;color:' + x.color + '">' + esc(x.name) + '</b>' +
+          '<p class="sub mt4" style="font-size:14px">' + esc(x.text) + '</p><p class="sub mt6" style="font-size:12.5px;color:var(--faint)">' + esc(x.watch) + '</p></div>';
+      }).join('')
+    : '<p class="sub mt10" style="font-size:14px">Your strengths overlap rather than complement. That makes things easy, but it also means you share the same blind spots, so check important decisions with someone different.</p>';
+  var evoBody = E.map(function (x) { return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">' + esc(x.when) + '</b><p class="sub mt4" style="font-size:14px">' + esc(x.text) + '</p></div>'; }).join('');
+  return spCard('How to talk to each other', 'Specific to the dimensions where you two differ. Each tip is written for one person to use with the other.', talkBody + shared) +
+    spCard('Giving feedback', 'One thing to keep in mind each way.', fb) +
+    spCard('What each of you covers for the other', 'Where one person’s strength is the other’s hardest thing.', swapBody) +
+    spCard('How this tends to change over time', 'A general pattern for pairings with this shape, not a prediction.', evoBody);
+}
+
+function compatPlusHTML(mine, them) {
+  if (!EnginePlus.validFacets(mine.facets) || !EnginePlus.validFacets(them.facets))
+    return plusNote('Facet-level comparison needs both people’s 20 facet scores. ' + (EnginePlus.validFacets(them.facets) ? 'Retake the assessment to unlock it.' : them.name + ' needs to open the app once while signed in so their profile updates.'));
+  var PX = EnginePlus.pair(mine.facets, them.facets, mine.name, them.name, state.compatLens);
+  var card = function (title, note, body) { return '<div class="card mt14"><div class="eb">' + esc(title) + '</div>' + (note ? '<p class="sub mt8" style="font-size:12px;color:var(--faint)">' + esc(note) + '</p>' : '') + body + '</div>'; };
+  var chips = segHTML(Object.keys(EnginePlus.LENSES).map(function (k) { return [k, EnginePlus.LENSES[k].label]; }), PX.lensKey, 'lens', 'data-lens', 'Relationship lens');
+  var lens = card('Relationship lens', 'Choose what you are to each other — the situations below are ordered for it.',
+    chips + '<p class="sub mt10" style="font-size:12.5px">' + esc(PX.lens.lead) + '</p><p class="sub mt6" style="font-size:12.5px"><b>Worth doing:</b> ' + esc(PX.lens.tip) + '</p>');
+  var li = function (r) { return '<div class="mt10" style="font-size:12.5px"><b>' + esc(r.name) + '</b> <span class="mono" style="font-size:12px;color:var(--faint)">' + r.a + ' vs ' + r.b + '</span><br>' + esc(r.text) + '</div>'; };
+  var allRows = PX.rows.map(function (r) { return '<div class="mt8" style="font-size:12px"><b>' + esc(r.name) + '</b> <span class="mono" style="font-size:12px;color:var(--faint)">' + r.a + ' / ' + r.b + '</span> — ' + esc(r.text) + '</div>'; }).join('');
+  var facetCard = card('Facet-by-facet — all 20 traits', 'Your five dimension scores hide detail: two people can match on a dimension and still differ on the facets inside it.',
+    legendHTML(mine.name, them.name) + facetMapHTML(function (k) { var row = PX.rows.filter(function (x) { return x.key === k; })[0]; return [{ v: row.a, color: MK_A, label: mine.name }, { v: row.b, color: MK_B, label: them.name }]; }) +
+    '<div class="mt18" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Strongest shared traits</b>' + (PX.sync.length ? PX.sync.map(li).join('') : '<p class="sub mt6" style="font-size:12.5px">No facet where you both lean strongly the same way — your common ground is in the middle rather than at the poles.</p>') + '</div>' +
+    '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Biggest differences</b>' + (PX.friction.length ? PX.friction.map(li).join('') : '<p class="sub mt6" style="font-size:12.5px">No facet differs by 20+ points — you are unusually close across the board.</p>') + '</div>' +
+    '<details class="mt14"><summary style="cursor:pointer;font-size:12.5px;text-decoration:underline">Read all 20 facets</summary>' + allRows + '</details>');
+  var scen = card('Situations, together', 'Joint score = the average of your two scores. Dots show each of you; the shaded bar is the joint score.',
+    PX.scenarios.map(function (s) {
+      var focus = PX.focusIds.indexOf(s.id) >= 0;
+      return scenBarHTML(s.title, s.joint, s.band, s.text, [{ v: s.a, color: MK_A, label: mine.name }, { v: s.b, color: MK_B, label: them.name }], focus ? 'focus' : (s.split ? 'split' : ''));
+    }).join(''));
+  var start = card('Conversation starters', 'Picked from the dimensions where you differ most.',
+    PX.starters.map(function (x) { return '<div class="mt10" style="font-size:12.5px"><span class="mono" style="font-size:12px;color:var(--faint)">' + esc(DIMS[x.dim].name) + '</span><br>“' + esc(x.text) + '”</div>'; }).join(''));
+  return '<div class="eb mt24">Deeper — facet level</div>' + lens + facetCard + scen + start + traitDuoPairHTML(mine, them);
+}
+
+
+/* ---------------- Generated traits: pair and group (trait-duo.js) ---------------- */
+function tdLine(label, text, color) {
+  return '<p class="sub mt6" style="font-size:13px"><b style="color:' + (color || 'var(--ink)') + '">' + esc(label) + ':</b> ' + esc(text) + '</p>';
+}
+function tdBasis(text) {
+  return '<details class="mt6"><summary style="cursor:pointer;font-size:12px;color:var(--faint)">Scores behind this</summary><p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(text) + '</p></details>';
+}
+function traitDuoPairHTML(mine, them) {
+  if (!TraitDuo.validFacets(mine.facets) || !TraitDuo.validFacets(them.facets)) return '';
+  var P = TraitDuo.pair(mine, them);
+  var head = spCard('Trait comparison — generated for the two of you', 'Each of you has your own 20 generated traits. This compares the traits themselves, not just the scores.',
+    '<p class="mt10" style="font-size:15px"><b>' + esc(P.headline) + '</b></p><p class="sub mt6" style="font-size:13.5px">' + esc(P.summary) + '</p>');
+  var shared = spCard('Traits you share', 'Same facets, leaning the same way. Easy to understand in each other, and easy to miss as a blind spot.',
+    P.shared.length ? P.shared.map(function (x) {
+      return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:14px">' + esc(x.title) + '</b><span class="mono" style="font-size:12px;color:var(--faint)">' + esc(x.ranks) + '</span></div>' +
+        '<p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(x.category) + '</p>' +
+        '<p class="sub mt6" style="font-size:13px">' + esc(x.text) + '</p>' + tdLine('Shared gift', x.gift) + tdLine('Shared watch-out', x.watch) + tdLine('Try together', x.tip) + tdBasis(x.basis) + '</div>';
+    }).join('') : '<p class="sub mt10" style="font-size:14px">No generated trait is shared in the same form. Your overlap is more in the middle ground than at the poles.</p>');
+  var opp = spCard('Traits that pull opposite ways', 'Same facet, opposite ends. This is where you can complement each other or talk past each other.',
+    P.opposite.length ? P.opposite.map(function (x) {
+      return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">' + esc(x.title) + '</b>' +
+        '<p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(x.category) + '</p>' +
+        '<p class="sub mt6" style="font-size:13px">' + esc(x.text) + '</p>' +
+        x.sides.map(function (sd) {
+          return '<div class="mt10"><b style="font-size:13px">' + esc(sd.who) + ' · ' + esc(sd.trait) + '</b>' + tdLine('Gift', sd.gift) + tdLine('Watch-out', sd.watch) + tdLine('Try', sd.tip) + '</div>';
+        }).join('') + '</div>';
+    }).join('') : '<p class="sub mt10" style="font-size:14px">None of your generated traits sit at opposite ends of the same facet. You are unusually aligned.</p>');
+  var sigs = P.signatures.map(function (sg) {
+    return spCard(sg.name + '’s signature traits, seen from outside', 'The three strongest generated traits, framed for the person closest to them.',
+      sg.items.map(function (x) {
+        return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">' + esc(x.title) + '</b>' +
+          '<p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(x.category) + '</p>' +
+          '<p class="sub mt6" style="font-size:13px">' + esc(x.text) + '</p>' + tdLine('Gift', x.gift) + tdLine('Cost', x.watch) + tdLine('What helps them', x.help) + tdBasis(x.basis) + '</div>';
+      }).join(''));
+  }).join('');
+  return '<div class="eb mt24">Generated traits — the two of you</div>' + head + shared + opp + sigs +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Built from self-reported facet scores by a rule-based engine. Hypotheses to talk through, not verdicts.</p>';
+}
+function traitDuoGroupHTML(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return plusNote('Group traits need at least two members whose 20 facet scores are available.');
+  var G = TraitDuo.group(fm);
+  var head = spCard('Group traits — generated from every member’s own 20', 'Each member’s traits are generated separately, then compared with each other.',
+    '<p class="mt10" style="font-size:15px"><b>' + esc(G.headline) + '</b></p><p class="sub mt6" style="font-size:13.5px">' + esc(G.summary) + '</p>' +
+    (G.themes.length ? '<p class="sub mt10" style="font-size:13px"><b style="color:var(--ink)">Where the trait weight sits:</b> ' + G.themes.map(function (t) { return esc(t.category) + ' (' + t.count + ')'; }).join(', ') + '.</p>' : ''));
+  var common = spCard('Traits several members share', 'Same facets, leaning the same way. The group’s natural common ground.',
+    G.common.length ? G.common.map(function (c) {
+      return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:14px">' + esc(c.title) + '</b><span class="mono" style="font-size:12px;color:var(--faint)">' + (c.all ? 'everyone' : c.count + ' of ' + G.members) + '</span></div>' +
+        '<p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(c.category) + ' · ' + esc(c.names.join(', ')) + '</p>' +
+        tdLine('Gift', c.strength) + tdLine('Watch-out', c.challenge) + tdLine('Try as a group', c.insight) + '</div>';
+    }).join('') : '<p class="sub mt10" style="font-size:14px">No generated trait is shared by enough members to count as common ground.</p>');
+  var wo = G.watchouts.length ? spCard('Collective watch-outs', 'When several people share a risk, nobody in the room is placed to catch it.',
+    G.watchouts.map(function (w) { return spItem('var(--S)', esc(w.text) + ' <span style="color:var(--faint)">(' + w.share + ' of ' + G.members + ' · ' + esc(w.titles.join(', ')) + ')</span>'); }).join('')) : '';
+  var uniq = spCard('What only one person brings', 'Strong traits nobody else in the group shares. Lose the person and the group loses the trait.',
+    G.unique.length ? G.unique.map(function (u) {
+      return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">' + esc(u.name) + ' · ' + esc(u.title) + '</b>' +
+        '<p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(u.category) + '</p>' + tdLine('Gift', u.strength) + tdLine('Watch-out', u.challenge) + tdBasis(u.basis) + '</div>';
+    }).join('') : '<p class="sub mt10" style="font-size:14px">Every strong trait is shared by at least one other member.</p>');
+  var tens = G.tensions.length ? spCard('Where members pull opposite ways', 'The sharpest pairs of opposing traits across the group.',
+    G.tensions.map(function (t) { return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">' + esc(t.a) + ' × ' + esc(t.b) + ' · ' + esc(t.facet) + '</b><p class="sub mt4" style="font-size:13px">' + esc(t.text) + '</p></div>'; }).join('')) : '';
+  var sigs = spCard('Each member’s signature traits', 'Their three strongest generated traits.',
+    G.signatures.map(function (m) { return '<div class="mt12"><b style="font-size:14px">' + esc(m.name) + '</b><p class="sub mt4" style="font-size:13px">' + m.items.map(function (x) { return esc(x.title); }).join(' · ') + '</p></div>'; }).join(''));
+  return '<div class="mt18"></div>' + head + common + wo + uniq + tens + sigs + groupFacetNote(members) +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Rule-based, from self-reported facet scores. Describes composition, not performance.</p>';
+}
+function plusReportTraitsPair(mine, them) {
+  if (!TraitDuo.validFacets(mine.facets) || !TraitDuo.validFacets(them.facets)) return '';
+  var P = TraitDuo.pair(mine, them);
+  var f = function (l, t) { return '<i>' + l + ':</i> ' + esc(t) + ' '; };
+  return rsec('Generated traits — the two of you', rp('<b>' + esc(P.headline) + '.</b> ' + esc(P.summary)) +
+    rp('<b>Traits you share</b>') + (P.shared.map(function (x) { return rp('<b>' + esc(x.title) + '</b> — ' + f('Gift', x.gift) + f('Watch-out', x.watch) + f('Try', x.tip)); }).join('') || rp('None in the same form.')) +
+    rp('<b>Traits that pull opposite ways</b>') + (P.opposite.map(function (x) { return rp('<b>' + esc(x.title) + '</b> — ' + esc(x.text) + ' ' + x.sides.map(function (sd) { return '<i>' + esc(sd.who) + ':</i> ' + esc(sd.gift) + '; watch-out: ' + esc(sd.watch) + '. '; }).join('')); }).join('') || rp('None.')) +
+    P.signatures.map(function (sg) { return rp('<b>' + esc(sg.name) + '’s signature traits</b>') + sg.items.map(function (x) { return rp('<b>' + esc(x.title) + '</b> — ' + f('Gift', x.gift) + f('Cost', x.watch) + f('What helps', x.help)); }).join(''); }).join(''), true);
+}
+function plusReportTraitsGroup(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return '';
+  var G = TraitDuo.group(fm);
+  var f = function (l, t) { return '<i>' + l + ':</i> ' + esc(t) + ' '; };
+  return rsec('Generated group traits', rp('<b>' + esc(G.headline) + '.</b> ' + esc(G.summary)) +
+    rp('<b>Traits several members share</b>') + (G.common.map(function (c) { return rp('<b>' + esc(c.title) + '</b> (' + esc(c.names.join(', ')) + ') — ' + f('Gift', c.strength) + f('Watch-out', c.challenge) + f('Try', c.insight)); }).join('') || rp('None.')) +
+    (G.watchouts.length ? rp('<b>Collective watch-outs</b>') + G.watchouts.map(function (w) { return rp(esc(w.text) + ' (' + w.share + ' of ' + G.members + ')'); }).join('') : '') +
+    rp('<b>What only one person brings</b>') + (G.unique.map(function (u) { return rp('<b>' + esc(u.name) + ' · ' + esc(u.title) + '</b> — ' + f('Gift', u.strength) + f('Watch-out', u.challenge)); }).join('') || rp('None.')) +
+    (G.tensions.length ? rp('<b>Where members pull opposite ways</b>') + G.tensions.map(function (t) { return rp('<b>' + esc(t.a) + ' × ' + esc(t.b) + '</b> — ' + esc(t.text)); }).join('') : ''), true);
+}
+
+/* Group: facet heatmap, scenarios, roles */
+function groupFacetMembers(members) { return members.filter(function (m) { return EnginePlus.validFacets(m.facets); }); }
+function groupFacetNote(members) {
+  var miss = members.filter(function (m) { return !EnginePlus.validFacets(m.facets); }).map(function (m) { return m.name; });
+  return miss.length ? '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Not included (facet scores not shared yet — they need to open the app once while signed in): ' + esc(miss.join(', ')) + '.</p>' : '';
+}
+function groupFacetHeat(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return plusNote('Facet-level views need at least two members whose 20 facet scores are available.') ;
+  var keys = EnginePlus.facetKeys();
+  var head = '<tr><th style="padding:4px"></th>' + DIM_ORDER.map(function (d) { return '<th colspan="4" style="padding:4px;font-size:12px;color:var(--faint);border-left:1px solid var(--line)">' + esc(DIMS[d].name) + '</th>'; }).join('') + '</tr>' +
+    '<tr><th style="text-align:left;padding:4px;font-size:12px;color:var(--faint)">Member</th>' + keys.map(function (k, i) { var fi = EnginePlus.facetInfo(k); return '<th title="' + esc(fi.name) + '" style="padding:4px 2px;font-size:9.5px;color:var(--faint);' + (i % 4 === 0 ? 'border-left:1px solid var(--line);' : '') + '">' + esc(fi.name.slice(0, 4)) + '</th>'; }).join('') + '</tr>';
+  var cell = function (k, v, i) { var fi = EnginePlus.facetInfo(k); return '<td style="position:relative;text-align:center;padding:6px 2px;min-width:30px;' + (i % 4 === 0 ? 'border-left:1px solid var(--line);' : '') + '"><span style="position:absolute;inset:0;background:' + fi.color + ';opacity:' + (0.06 + 0.7 * v / 100).toFixed(2) + '"></span><b style="position:relative;font-size:12px">' + v + '</b></td>'; };
+  var rows = fm.map(function (m) { return '<tr style="border-top:1px solid var(--line)"><td style="padding:6px 4px;font-size:12px;white-space:nowrap">' + esc(m.name) + '</td>' + keys.map(function (k, i) { return cell(k, m.facets[k], i); }).join('') + '</tr>'; }).join('');
+  var GP = EnginePlus.group(fm);
+  var avg = '<tr style="border-top:2px solid var(--line)"><td style="padding:6px 4px;font-size:12px"><b>Average</b></td>' + GP.facets.map(function (x, i) { return cell(x.key, x.avg, i); }).join('') + '</tr>';
+  return '<div class="card mt14"><div class="eb">Facet heatmap — everyone × 20 traits</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Darker = higher. Hover (or long-press) a column header for the facet name.</p>' +
+    '<div style="overflow-x:auto;margin-top:10px"><table style="border-collapse:collapse;width:100%">' + head + rows + avg + '</table></div>' + groupFacetNote(members) + '</div>';
+}
+function groupScenTab(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return plusNote('Scenario analysis needs at least two members whose 20 facet scores are available.');
+  var GP = EnginePlus.group(fm);
+  var scen = GP.scenarios.map(function (s) {
+    return scenBarHTML(s.title, s.avg, s.band, s.text, s.scores.map(function (x) { return { v: x.score, color: 'var(--ink)', label: x.name }; }), s.uneven ? 'uneven' : '');
+  }).join('');
+  var play = GP.playbook.filter(function (x) { return x.text; }).map(function (x) { return '<div class="mt10"><b style="font-size:13px">' + esc(x.title) + '</b><p class="sub mt4" style="font-size:12.5px">' + esc(x.text) + '</p></div>'; }).join('');
+  var actions = GP.actions.map(function (a, i) { return '<div class="row mt10" style="gap:8px;align-items:baseline"><span class="mono" style="color:var(--faint)">' + (i + 1) + '.</span><span style="font-size:12.5px">' + esc(a) + '</span></div>'; }).join('');
+  return '<div class="card mt18"><div class="eb">How the group handles 8 situations</div>' +
+      '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Bar = the group average for that situation; each dot is one member. Spread-out dots mean the group is uneven there.</p>' + scen + groupFacetNote(members) + '</div>' +
+    (play ? '<div class="card mt14"><div class="eb">Team playbook</div>' + play + '</div>' : '') +
+    '<div class="card mt14"><div class="eb">Suggested team actions</div><p class="sub mt8" style="font-size:12px;color:var(--faint)">Drawn from role gaps, weak situations and uneven situations.</p>' + actions + '</div>' +
+    groupFacetHeat(members) +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Rule-based and describes composition from self-reported facets — not performance.</p>';
+}
+function groupRolesTab(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return plusNote('Role analysis needs at least two members whose 20 facet scores are available.');
+  var GP = EnginePlus.group(fm);
+  var chip = function (st) { return st === 'covered' ? 'Covered' : st === 'partial' ? 'Partly covered' : 'Gap'; };
+  var rows = GP.roles.map(function (r) {
+    return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:13.5px">' + esc(r.name) + '</b>' +
+      '<span class="mono" style="font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:' + (r.state === 'gap' ? 'var(--S)' : 'var(--faint)') + '">' + chip(r.state) + ' · ' + r.best + '</span></div>' +
+      '<p class="sub mt4" style="font-size:12px;color:var(--faint)">' + esc(r.desc) + '</p>' +
+      '<p class="sub mt4" style="font-size:12.5px">' + (r.state === 'covered' ? 'Natural fit: <b>' + esc(r.champions.join(', ')) + '</b>.' : r.state === 'partial' ? 'Closest fit: <b>' + esc(r.top) + '</b>, but not strongly. ' + esc(r.gap) : esc(r.gap)) + '</p></div>';
+  }).join('');
+  return '<div class="card mt18"><div class="eb">Team roles — who naturally covers what</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Eight working roles, each scored from the facets that matter for it (62+ counts as a natural fit). This shows tendencies, not job titles — anyone can step into any role.</p>' +
+    '<div class="row mt10" style="gap:8px;flex-wrap:wrap">' + gStat('Covered', GP.roles.filter(function (r) { return r.state === 'covered'; }).length + '/8', 'natural fits') + gStat('Gaps', GP.gaps.length, 'no natural fit') + '</div>' + rows + groupFacetNote(members) + '</div>';
+}
+function groupTeamTab(members) {
+  var M = SocialPlus.meeting(members), G = SocialPlus.gaps(members), TM = SocialPlus.teams(members);
+  var roleRows = M.roles.length
+    ? M.roles.map(function (r) { return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:14px">' + esc(r.who) + '</b><span style="font-size:12.5px;color:var(--faint)">' + esc(r.label) + '</span></div><p class="sub mt4" style="font-size:14px">' + esc(r.text) + '</p></div>'; }).join('')
+    : '<p class="sub mt10" style="font-size:14px">Nobody stands out strongly in any direction, so the meeting will go however the agenda pushes it.</p>';
+  var tips = M.tips.map(function (t) { return spItem('var(--ink)', esc(t)); }).join('');
+  var meeting = spCard('How a decision meeting is likely to go', 'Who tends to do what when this group has to decide something. These are tendencies from the five scores, not fixed behaviour.', roleRows +
+    (M.risk ? '<p class="sub mt14" style="font-size:14px"><b style="color:var(--ink)">Most likely tension:</b> ' + esc(M.risk) + '</p>' : '') +
+    (tips ? '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">To run it well</b>' + tips + '</div>' : ''));
+  var gapBody = G.length
+    ? G.map(function (g) { return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:14px;color:' + g.color + '">' + esc(g.name) + '</b><span style="font-size:12.5px;color:var(--faint)">nobody ' + esc(g.missing.toLowerCase()) + '</span></div><p class="sub mt4" style="font-size:14px">' + esc(g.add) + '</p><p class="sub mt4" style="font-size:12.5px;color:var(--faint)">' + esc(g.risk) + '</p></div>'; }).join('')
+    : '<p class="sub mt10" style="font-size:14px">Every dimension has at least one person on each side, so there is no obvious missing viewpoint. If you do add someone, pick whoever is least like the current average.</p>';
+  var gaps = spCard('Who the group is missing', 'Dimensions where nobody sits on one side. Useful when you are deciding who to bring in next.', gapBody);
+  var teamBody = TM.tasks.map(function (t) {
+    return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:14px">' + esc(t.title) + '</b>' +
+      '<p class="sub mt4" style="font-size:14px"><b style="color:var(--ink)">' + esc(t.a) + ' + ' + esc(t.b) + '</b>: ' + esc(t.why) + '.</p></div>';
+  }).join('') + (TM.risky.length ? '<p class="sub mt14" style="font-size:13px;color:var(--faint)">Give these pairs extra room on deadline-heavy work: ' + TM.risky.map(function (r) { return esc(r.a) + ' and ' + esc(r.b) + ' (' + r.score + ')'; }).join('; ') + '.</p>' : '');
+  var teams = spCard('Best pair for each kind of work', 'The two people whose scores suit each task best. This describes how the personalities combine, not a performance rating.', teamBody);
+  return '<div class="mt18"></div>' + meeting + gaps + teams +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">All rule-based, from self-reported scores. These describe how personalities combine, not how well anyone does the work.</p>';
+}
+function groupFacetStory(members) {
+  var fm = groupFacetMembers(members);
+  if (fm.length < 2) return '';
+  var GP = EnginePlus.group(fm);
+  if (!GP.highlights.length) return '';
+  return '<div class="card mt14"><div class="eb">Facet highlights</div><p class="sub mt8" style="font-size:12px;color:var(--faint)">The sharpest agreements and splits among the 20 narrower traits.</p>' +
+    GP.highlights.map(function (t) { return '<p class="sub mt10" style="font-size:12.5px">' + esc(t) + '</p>'; }).join('') + '</div>';
+}
+
+/* ---------------- GROUP TABS ---------------- */
+function gStat(label, value, sub) {
+  return '<div style="flex:1;min-width:96px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surf)">' +
+    '<div class="mono" style="font-size:12px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em">' + esc(label) + '</div>' +
+    '<div style="font-size:24px;font-weight:700;margin-top:2px">' + esc(String(value)) + '</div>' +
+    '<div style="font-size:12px;color:var(--faint)">' + esc(sub) + '</div></div>';
+}
+function groupHealthCard(GI, g) {
+  var h = GI.health;
+  return '<div class="card mt18"><div class="eb">Team at a glance</div>' +
+    '<div class="row mt10" style="gap:8px;flex-wrap:wrap">' +
+      gStat('Cohesion', h.cohesion, h.cohesionLabel) + gStat('Diversity', h.diversity, h.diversityLabel) + gStat('Coverage', h.coverage + '/5', 'both poles present') +
+    '</div>' +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)"><b>Cohesion</b> is the average pairwise compatibility. <b>Diversity</b> is the average spread (in points) of individual scores around the group mean across the 5 dimensions. <b>Coverage</b> counts dimensions where at least one person leans clearly to each pole. These describe composition \u2014 they do not predict how well the group will perform.</p>' +
+  '</div>';
+}
+function groupMembersTab(members, g, GI, subgroupCard) {
+  var rd = state.groupRankDim;
+  var ranked = GroupInsights.ranking(members, rd);
+  var chips = segHTML(DIM_ORDER.map(function (d) { return [d, DIMS[d].name]; }), rd, 'grank', 'data-dim', 'Rank by dimension');
+  var rankCard = '<div class="card mt14"><div class="eb">Ranking by dimension</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Highest to lowest on one dimension. Neither end is \u201cbetter\u201d \u2014 it shows who sits where on the spectrum (' + esc(GroupInsights.POLE[rd][0]) + ' \u2194 ' + esc(GroupInsights.POLE[rd][1]) + ').</p>' +
+    chips +
+    ranked.map(function (m, i) {
+      return '<div class="mt10"><div class="row between center"><span style="font-size:13px"><span class="mono" style="color:var(--faint)">' + (i + 1) + '.</span> ' + esc(m.name) + '</span><b style="font-size:13px">' + m.dims[rd] + '</b></div>' +
+        '<div style="height:6px;background:var(--surf);border-radius:3px;overflow:hidden;margin-top:4px"><div style="height:100%;width:' + m.dims[rd] + '%;background:' + DIMS[rd].color + '"></div></div></div>';
+    }).join('') + '</div>';
+  var cards = GI.cards.map(function (c) {
+    return '<div class="card mt14"><div class="row between center"><b style="font-size:15px">' + esc(c.name) + '</b>' +
+        '<span style="font-size:12px;color:var(--faint)">' + esc(c.role) + '</span></div>' +
+      (c.archetype ? '<div class="mono" style="font-size:12px;color:var(--faint);margin-top:2px">' + esc(c.archetype) + '</div>' : '') +
+      DIM_ORDER.map(function (d) {
+        return '<div class="dimrow mt8"><div class="dimlabel">' + esc(DIMS[d].name) + '</div><div class="dimtrack"><div class="dimfill" style="width:' + c.dims[d] + '%;background:' + DIMS[d].color + '"></div></div><div class="dimval">' + c.dims[d] + '</div></div>';
+      }).join('') +
+      '<p class="sub mt10" style="font-size:12.5px">' + esc(c.standout.text) + '</p>' +
+      (c.closest ? '<p class="sub mt6" style="font-size:12px;color:var(--faint)">Closest match: <b style="color:var(--ink)">' + esc(c.closest.name) + '</b> (' + c.closest.score + ') \u00b7 Widest gap: <b style="color:var(--ink)">' + esc(c.furthest.name) + '</b> (' + c.furthest.score + ')</p>' : '') +
+    '</div>';
+  }).join('');
+  return rankCard + subgroupCard + '<div class="eb mt18">Member profiles</div>' + cards;
+}
+function groupHeatTab(members, g, GI) {
+  var cell = function (d, v) {
+    return '<td style="position:relative;text-align:center;padding:8px 6px;min-width:46px"><span style="position:absolute;inset:0;background:' + DIMS[d].color + ';opacity:' + (0.08 + 0.72 * v / 100).toFixed(2) + '"></span><b style="position:relative;font-size:12.5px">' + v + '</b></td>';
+  };
+  var head = '<tr><th style="text-align:left;padding:6px;font-size:12px;color:var(--faint)">Member</th>' + DIM_ORDER.map(function (d) { return '<th style="padding:6px;font-size:12px;color:var(--faint)" title="' + esc(DIMS[d].name) + '">' + d + '</th>'; }).join('') + '</tr>';
+  var rows = members.map(function (m) {
+    return '<tr style="border-top:1px solid var(--line)"><td style="padding:8px 6px;font-size:12.5px;white-space:nowrap">' + esc(m.name) + '</td>' + DIM_ORDER.map(function (d) { return cell(d, m.dims[d]); }).join('') + '</tr>';
+  }).join('');
+  var avgRow = '<tr style="border-top:2px solid var(--line)"><td style="padding:8px 6px;font-size:12.5px"><b>Group average</b></td>' + DIM_ORDER.map(function (d) { return cell(d, g.avg[d]); }).join('') + '</tr>';
+  var heat = '<div class="card mt18"><div class="eb">Heatmap \u2014 everyone \u00d7 5 dimensions</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Darker = higher score. P Perception \u00b7 R Response \u00b7 I Identity \u00b7 S Social \u00b7 M Motivation.</p>' +
+    '<div style="overflow-x:auto;margin-top:10px"><table style="border-collapse:collapse;width:100%">' + head + rows + avgRow + '</table></div></div>';
+  var range = '<div class="card mt14"><div class="eb">Spread \u2014 where each person sits</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Each dot is a person; the line marks the group average. A tight cluster means agreement, a wide scatter means a real split.</p>' +
+    GI.comp.map(function (c) {
+      return '<div class="mt14"><div class="row between center"><b style="font-size:12.5px">' + esc(DIMS[c.dim].name) + '</b><span class="mono" style="font-size:12px;color:var(--faint)">avg ' + c.avg + ' \u00b7 spread \u00b1' + c.spread + '</span></div>' +
+        '<div style="position:relative;height:22px;margin-top:6px;background:var(--surf);border-radius:11px">' +
+          '<div style="position:absolute;left:' + c.avg + '%;top:2px;bottom:2px;width:2px;background:var(--ink);opacity:.6"></div>' +
+          members.map(function (m) { return '<div title="' + esc(m.name) + ' ' + m.dims[c.dim] + '" style="position:absolute;left:calc(' + m.dims[c.dim] + '% - 6px);top:5px;width:12px;height:12px;border-radius:50%;background:' + DIMS[c.dim].color + ';opacity:.75;border:1px solid var(--bg)"></div>'; }).join('') +
+        '</div>' +
+        '<div class="row between" style="font-size:12px;color:var(--faint);margin-top:2px"><span>' + esc(GroupInsights.POLE[c.dim][0]) + '</span><span>' + esc(GroupInsights.POLE[c.dim][1]) + '</span></div>' +
+        '<div style="font-size:12px;color:var(--faint)">Lowest: ' + esc(c.bottom.name) + ' (' + c.bottom.dims[c.dim] + ') \u00b7 Highest: ' + esc(c.top.name) + ' (' + c.top.dims[c.dim] + ')</div></div>';
+    }).join('') + '</div>';
+  return heat + range;
+}
+function groupInsightsTab(g, GI) {
+  var item = function (dim, text) {
+    return '<div class="row" style="gap:8px;align-items:baseline;margin-top:10px"><span style="width:8px;height:8px;border-radius:50%;background:' + (dim ? DIMS[dim].color : 'var(--faint)') + ';flex:none"></span><span style="font-size:12.5px">' + (dim ? '<b>' + esc(DIMS[dim].name) + '</b> \u2014 ' : '') + esc(text) + '</span></div>';
+  };
+  var card = function (title, note, body) {
+    return '<div class="card mt14"><div class="eb">' + esc(title) + '</div>' + (note ? '<p class="sub mt8" style="font-size:12px;color:var(--faint)">' + esc(note) + '</p>' : '') + body + '</div>';
+  };
+  var d = GI.decision;
+  var hot = GI.hotspots.length
+    ? GI.hotspots.map(function (h) {
+        return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">' + esc(DIMS[h.dim].name) + '</b> <span class="mono" style="font-size:12px;color:var(--faint)">spread \u00b1' + h.spread + '</span>' +
+          '<p class="sub mt4" style="font-size:12.5px"><b>' + esc(h.a.name) + '</b> (' + h.a.dims[h.dim] + ') and <b>' + esc(h.b.name) + '</b> (' + h.b.dims[h.dim] + ') sit ' + h.gap + ' points apart \u2014 the widest split in the group on this dimension.</p>' +
+          '<p class="sub mt4" style="font-size:12px;color:var(--faint);font-style:italic">' + esc(h.prompt) + '</p></div>';
+      }).join('')
+    : '<p class="sub mt10" style="font-size:12.5px">No dimension shows a wide split \u2014 the group is fairly evenly spread, so friction is less likely to come from any one trait.</p>';
+  var pairHot = GI.pairHotspots.length
+    ? GI.pairHotspots.map(function (p) {
+        return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">' + esc(p.a) + ' \u00d7 ' + esc(p.b) + '</b> <span class="mono" style="font-size:12px;color:var(--faint)">' + p.score + '</span>' +
+          '<p class="sub mt4" style="font-size:12.5px">' + esc(p.conflict.why) + '</p>' + (p.conflict.dim ? '<p class="sub mt4" style="font-size:12px"><b>A way through:</b> ' + esc(p.conflict.bridge) + '</p>' : '') + '</div>';
+      }).join('')
+    : '<p class="sub mt10" style="font-size:12.5px">No pair scores below 55 \u2014 no pairing stands out as strained on the numbers.</p>';
+  return card('Strengths', 'Where the group\u2019s collective lean is clear, this is what it tends to be good at.',
+      GI.strengths.length ? GI.strengths.map(function (x) { return item(x.dim, x.text); }).join('') : '<p class="sub mt10" style="font-size:12.5px">The group sits near the middle on every dimension, so there is no single collective strength \u2014 it flexes with who is in the room.</p>') +
+    card('Blind spots', 'Risks that come with the same leanings, plus viewpoints nobody naturally represents.',
+      GI.blindSpots.length ? GI.blindSpots.map(function (x) { return item(x.dim, x.text); }).join('') : '<p class="sub mt10" style="font-size:12.5px">No strong collective blind spot \u2014 both poles are represented on every dimension.</p>') +
+    card('Communication tips', 'How to talk to this group so it lands.', GI.communication.map(function (x) { return item(x.dim, x.text); }).join('')) +
+    card('Decision-making style', 'A read on how this group tends to decide, from the same five scores.',
+      item('R', 'Pace: ' + d.pace) + item('I', 'Authority: ' + d.authority) + item('P', 'Evidence: ' + d.evidence) + item('M', 'Follow-through: ' + d.followThrough) +
+      '<p class="sub mt12" style="font-size:12.5px">' + esc(d.format) + '</p>') +
+    card('Conflict hotspots \u2014 by dimension', 'Where individuals are furthest apart on one trait.', hot) +
+    card('Conflict hotspots \u2014 by pair', 'The lowest-scoring pairings and the friction the numbers suggest.', pairHot) +
+    '<p class="sub mt14" style="font-size:12px;color:var(--faint)">All of this is generated from the five scores with fixed rules. It describes composition and tendencies, not individuals\u2019 behaviour or the group\u2019s results.</p>';
+}
+function groupStoryTab(GI) {
+  var st = GI.story;
+  var p = function (t, extra) { return '<p class="sub mt10" style="font-size:13px;line-height:1.6' + (extra || '') + '">' + esc(t) + '</p>'; };
+  var summary = '<div class="card mt18"><div class="eb">The group in words</div>' + st.summary.map(function (t) { return p(t); }).join('') + '</div>';
+  var dims = '<div class="card mt14"><div class="eb">Dimension by dimension</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Each paragraph is written from the group’s actual scores on that dimension. The small line under it shows the rule that decided how the group was classified.</p>' +
+    st.dims.map(function (x) {
+      return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><div class="row between center"><b style="font-size:13.5px">' + esc(DIMS[x.dim].name) + '</b>' +
+        '<span class="mono" style="font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--faint)">' + esc(x.stateLabel) + '</span></div>' +
+        p(x.text) + '<p class="sub mt6" style="font-size:12px;color:var(--faint);font-style:italic">Why this label: ' + esc(x.rule) + '</p></div>';
+    }).join('') + '</div>';
+  var members = '<div class="card mt14"><div class="eb">Each member, in words</div>' +
+    st.members.map(function (m) { return '<div class="mt12" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">' + esc(m.name) + '</b>' + p(m.text, ';margin-top:4px') + '</div>'; }).join('') + '</div>';
+  var pairs = '<div class="card mt14"><div class="eb">The two pairings to know</div>' +
+    '<div class="mt10"><b style="font-size:13px">Easiest</b>' + p(st.best.head, ';margin-top:4px') + (st.best.arch ? p(st.best.arch, ';margin-top:6px;font-size:12.5px;color:var(--faint)') : '') + '</div>' +
+    '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Widest</b>' + p(st.worst.head, ';margin-top:4px') + (st.worst.arch ? p(st.worst.arch, ';margin-top:6px;font-size:12.5px;color:var(--faint)') : '') + '</div></div>';
+  var how = '<div class="card mt14"><div class="eb">How this text was written</div>' + st.method.map(function (t) { return p(t, ';font-size:12.5px'); }).join('') + '</div>';
+  return summary + dims + members + pairs + how;
+}
+function groupPairsTab(members, g) {
+  var sel = state.groupPair, selHTML = '';
+  if (sel) {
+    var A = members.filter(function (m) { return m.name === sel[0]; })[0], B = members.filter(function (m) { return m.name === sel[1]; })[0];
+    if (A && B) selHTML = '<div class="row between center mt18"><div class="eb">Pair deep-dive</div><button class="linkbtn" data-act="gpairclose">Close \u2715</button></div>' + compareResultHTML(A, B, false);
+  }
+  var list = '<div class="card mt14"><div class="eb">All pairs (' + g.pairs.length + ')</div>' +
+    '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Tap a pair for the full trait-by-trait breakdown, conflict style and archetype pairing.</p>' +
+    g.pairs.map(function (p) {
+      var on = sel && ((sel[0] === p.a && sel[1] === p.b) || (sel[0] === p.b && sel[1] === p.a));
+      return '<div class="row between center mt10" role="button" tabindex="0" data-act="gpair" data-a="' + esc(p.a) + '" data-b="' + esc(p.b) + '" style="padding-top:10px;border-top:1px solid var(--line);cursor:pointer">' +
+        '<span style="font-size:13px;' + (on ? 'font-weight:700' : '') + '">' + esc(p.a) + ' \u00d7 ' + esc(p.b) + '</span><b style="font-size:14px">' + p.score + ' \u203a</b></div>';
+    }).join('') + '</div>';
+  return selHTML + list;
+}
+
+/* ---------------- GROUP / TEAM COMPARISON (same code mechanism, 2+ people) ---------------- */
+function viewGroup() {
+  var gate = socialGate(), socialHTML = '', members = [], activeG = null;
+  if (!gate) {
+    var uid = state.user.id, em = userEmail(), busy = state.socialBusy ? ' disabled' : '';
+    var S = state.social;
+    var iAmIn = function (gid) { return S.members.some(function (m) { return m.group_id === gid && m.user_id === uid && m.status === 'accepted'; }); };
+    var myGroups = S.groups.filter(function (g) { return iAmIn(g.id); });
+    var invites = S.members.filter(function (m) { return m.status === 'invited' && String(m.email).toLowerCase() === em; })
+      .map(function (m) { return { gid: m.group_id, group: S.groups.filter(function (g) { return g.id === m.group_id; })[0] }; })
+      .filter(function (x) { return x.group; });
+    activeG = myGroups.filter(function (g) { return g.id === state.activeGroup; })[0] || null;
+    var invCard = invites.length
+      ? '<div class="card mt14"><div class="eb">Group invitations</div>' +
+          '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Joining shares your name, dimension and facet scores and archetype with everyone in the group, including people who join later. ' + esc(PsychePolicy.SCOPE_TEXT) + '</p>' +
+          invites.map(function (x) {
+            return '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><div style="font-size:13.5px;font-weight:600">' + esc(x.group.name) + '</div>' +
+              '<div class="row mt8" style="gap:8px"><button class="btn ghost" data-act="acceptgroup" data-id="' + esc(x.gid) + '"' + busy + '>Join</button>' +
+              '<button class="linkbtn" data-act="declinegroup" data-id="' + esc(x.gid) + '" style="color:var(--S)">Decline</button></div></div>';
+          }).join('') + '</div>'
+      : '';
+    if (activeG) {
+      members = groupPeople(activeG.id);
+      var isOwner = activeG.owner_id === uid;
+      var rows = S.members.filter(function (m) { return m.group_id === activeG.id; });
+      var rowHTML = rows.map(function (m, i) {
+        var prof = m.user_id ? S.profiles[m.user_id] : null;
+        var isMe = m.user_id === uid;
+        var nm = isMe ? myName() + ' (you)' : (prof && prof.display_name) || m.email;
+        var st = m.status === 'invited' ? 'invited \u2014 waiting' : (isMe ? (state.result ? 'joined' : 'joined \u2014 take the test') : (personOf(prof) ? 'joined' : 'joined \u2014 no test yet'));
+        return '<div class="row between center mt10" style="padding-top:10px;border-top:' + (i === 0 ? 'none' : '1px solid var(--line)') + '">' +
+          '<span style="font-size:13px"><b>' + esc(nm) + '</b><br><span style="font-size:12px;color:var(--faint)">' + esc(st) + '</span></span>' +
+          (isOwner && !isMe ? '<button class="linkbtn" data-act="removemember" data-email="' + esc(m.email) + '" style="color:var(--S)">Remove</button>' : '') + '</div>';
+      }).join('');
+      socialHTML = socialMsgBox() + invCard +
+        '<div class="card mt14"><div class="row between center"><div class="eb">' + esc(activeG.name) + '</div><button class="linkbtn" data-act="backgroups">\u2190 All groups</button></div>' +
+          '<p class="sub mt8" style="font-size:12px;color:var(--faint)">Everyone in this group sees everyone\u2019s name, dimension and facet scores and archetype \u2014 never answers.</p>' +
+          rowHTML +
+          (isOwner
+            ? '<label class="field mt14"><span>Invite by email</span><input class="input" id="groupInviteEmail" type="email" inputmode="email" autocomplete="off" placeholder="teammate@example.com" value="' + esc(state.groupInviteDraft) + '"></label>' +
+              '<button class="btn ghost block mt10" data-act="invitegroup"' + busy + '>Invite to group</button>' +
+              '<p class="sub mt8" style="font-size:12px;color:var(--faint)">No email is sent automatically \u2014 they see the invite when they sign in with that exact email. Send them the site link: <span class="mono" style="word-break:break-all">' + esc(siteUrl()) + '</span> <button class="linkbtn" data-act="copycode" data-code="' + esc(siteUrl()) + '">' + (state.codeCopied ? 'Copied \u2713' : 'Copy') + '</button></p>' +
+              '<label class="field mt14"><span>Rename group</span><input class="input" id="groupRename" type="text" maxlength="80" value="' + esc(state.groupRenameDraft || activeG.name) + '"></label>' +
+              '<button class="btn ghost block mt10" data-act="renamegroup"' + busy + '>Save name</button>' +
+              '<button class="linkbtn mt12" data-act="deletegroup" style="color:var(--S);padding:0">Delete this group</button>'
+            : '<button class="linkbtn mt12" data-act="leavegroup" style="color:var(--S);padding:0">Leave this group</button>') +
+        '</div>';
+    } else {
+      socialHTML = socialMsgBox() + invCard +
+        '<div class="card mt14"><div class="eb">Your groups</div>' +
+          (myGroups.length ? myGroups.map(function (g) {
+            var n = S.members.filter(function (m) { return m.group_id === g.id && m.status === 'accepted'; }).length;
+            return '<div class="row between center mt10" style="padding-top:10px;border-top:1px solid var(--line)"><span style="font-size:13.5px;font-weight:600">' + esc(g.name) + ' <span style="font-weight:400;font-size:12px;color:var(--faint)">\u00b7 ' + n + ' joined</span></span>' +
+              '<button class="btn ghost" data-act="opengroup" data-id="' + esc(g.id) + '">Open</button></div>';
+          }).join('') : '<p class="sub mt8" style="font-size:12.5px">No groups yet \u2014 create one below, or accept an invitation.</p>') +
+        '</div>' +
+        (state.result
+          ? '<div class="card mt14"><div class="eb">Create a group</div>' +
+              '<label class="field mt8"><span>Group name</span><input class="input" id="groupNewName" type="text" maxlength="80" placeholder="e.g. Product team" value="' + esc(state.groupNameDraft) + '"></label>' +
+              '<button class="btn ghost block mt10" data-act="creategroup"' + busy + '>Create group</button></div>'
+          : '<div class="card mt14"><div class="eb">Create a group</div><p class="sub mt8" style="font-size:12.5px">Take the assessment first \u2014 you need your own scores to be in a group.</p><button class="btn primary block mt12" data-act="start">Take the PRISM test</button></div>');
+    }
+  }
+
+  var dimGuide = '<div class="card mt14"><div class="eb">What\u2019s being compared</div>' +
+    '<p class="sub mt8" style="font-size:12.5px">Every metric below \u2014 the group average, the variance, the pairwise scores \u2014 is built from the same 5 dimensions each person\u2019s individual result is scored on:</p>' +
+    DIM_ORDER.map(function (d) {
+      return '<div class="row" style="margin-top:8px;gap:8px;align-items:baseline"><span style="width:8px;height:8px;border-radius:50%;background:' + DIMS[d].color + ';flex:none;transform:translateY(-1px)"></span>' +
+        '<span style="font-size:12.5px"><b>' + esc(DIMS[d].name) + '</b> \u2014 ' + esc(DIMS[d].blurb) + '</span></div>';
+    }).join('') +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Personality here isn\u2019t treated as a fixed category (\u201cintrovert,\u201d \u201cleader\u201d) but as five continuous scores \u2014 which is what makes averaging a group, or measuring how scattered it is on one trait, mathematically meaningful in the first place.</p>' +
+  '</div>' +
+  '<div class="card mt14"><div class="eb">How to read a group, not just a pair</div>' +
+    '<p class="sub mt8" style="font-size:12.5px">A pair has one relationship to describe. A group has several things happening at once, so this screen breaks it into four distinct reads instead of one score:</p>' +
+    '<div class="mt10"><b style="font-size:13px">Average profile</b><p class="sub mt4" style="font-size:12.5px">The group\u2019s scores on each dimension, averaged across everyone in it. This describes the group\u2019s center of gravity \u2014 it is not, and isn\u2019t meant to be, an accurate description of any one person in it.</p></div>' +
+    '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">Variance / alignment</b><p class="sub mt4" style="font-size:12.5px">How spread out individual scores are around that average, dimension by dimension. Low variance on a trait means the group genuinely lands in similar territory there; high variance means real, measurable disagreement in how the group is composed on that trait \u2014 not necessarily conflict, but a real split worth knowing about.</p></div>' +
+    '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">Team archetype</b><p class="sub mt4" style="font-size:12.5px">The group\u2019s average profile, run through the exact same 36-archetype classifier used for an individual result. It names the group\u2019s collective tendency, not a person\u2019s type.</p></div>' +
+    '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">Pairwise matrix</b><p class="sub mt4" style="font-size:12.5px">Every two-person combination in the group, scored exactly like 1:1 Compatibility. This is where you find the specific relationships driving the group-level picture above \u2014 the average can look smooth even when it\u2019s hiding one very strong pairing and one very strained one.</p></div>' +
+  '</div>' +
+  '<div class="card mt14"><div class="eb">Is a diverse group better?</div>' +
+    '<p class="sub mt8" style="font-size:12.5px">This tool measures composition, not performance \u2014 it has no way of knowing whether your particular group works well together, only how spread out its trait scores are. With that caveat, two things are both broadly true of trait diversity in groups, and they pull in opposite directions:</p>' +
+    '<div class="mt10"><b style="font-size:13px">The case for high variance</b><p class="sub mt4" style="font-size:12.5px">A wider spread of Perception, Response, or Motivation styles means more angles on the same problem \u2014 someone grounded when others are abstract, someone cautious when others are bold. Homogeneous groups can move fast but also miss the same blind spot together, the same way two people who both score low on Perception can share a blind spot (see the trait guide above).</p></div>' +
+    '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">The case for low variance</b><p class="sub mt4" style="font-size:12.5px">A tightly aligned group coordinates with less friction and less need to translate between different working styles \u2014 faster consensus, but with the shared-blind-spot risk that comes with everyone seeing a situation the same way.</p></div>' +
+    '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Which one matters more depends entirely on what the group is actually for \u2014 the numbers below just tell you which situation you\u2019re in, on which dimension.</p>' +
+  '</div>';
+
+  var analysis = '';
+  if (members.length >= 2) {
+    var g = Engine.groupAnalysis(members);
+    var avgBars = DIM_ORDER.map(function (d) {
+      return '<div class="mt10"><div class="dimrow">' +
+        '<div class="dimlabel">' + esc(DIMS[d].name) + '</div>' +
+        '<div class="dimtrack"><div class="dimfill" style="width:' + g.avg[d] + '%;background:' + DIMS[d].color + '"></div></div>' +
+        '<div class="dimval">' + g.avg[d] + '</div></div>' +
+        '<p class="sub" style="font-size:12px;color:var(--faint);margin:2px 0 0 0">' + esc(DIMS[d].blurb) + ' \u00b7 variance ' + g.variance[d] + '</p></div>';
+    }).join('');
+
+    var rolesCard = '<div class="card mt14"><div class="eb">Natural roles in this group</div>' +
+      '<p class="sub mt8" style="font-size:12.5px">A heuristic read, not a job assignment \u2014 each person\u2019s top two dimensions mapped to a tendency label. No new data, just the same 5 scores read for what they suggest someone naturally gravitates toward in a group setting.</p>' +
+      members.map(function (m, i) {
+        var sr = suggestGroupRole(m.dims);
+        return '<div class="row between center mt10" style="padding-top:10px;border-top:' + (i === 0 ? 'none' : '1px solid var(--line)') + '">' +
+          '<span style="font-size:13px">' + esc(m.name) + '</span>' +
+          '<span style="font-size:12px;color:var(--faint)">' + esc(sr.role) + ' <span class="mono" style="font-size:12px">(' + sr.lead + '+' + sr.second + ')</span></span></div>';
+      }).join('') +
+    '</div>';
+
+    var subgroupCard = '';
+    if (members.length >= 5) {
+      var sg = subgroupSuggestions(members);
+      subgroupCard = '<div class="card mt14"><div class="eb">Natural sub-groupings</div>' +
+        '<p class="sub mt8" style="font-size:12.5px">Illustrative, not a verdict \u2014 for groups this size, here\u2019s who the numbers lean toward for two different modes of working:</p>' +
+        '<div class="mt10"><b style="font-size:13px">For fast decisions</b><p class="sub mt4" style="font-size:12.5px">' + sg.fast.map(esc).join(', ') + ' \u2014 highest combined Response + Motivation, the pair/trio most likely to move quickly without waiting for consensus.</p></div>' +
+        '<div class="mt10" style="padding-top:10px;border-top:1px solid var(--line)"><b style="font-size:13px">For careful review</b><p class="sub mt4" style="font-size:12.5px">' + sg.careful.map(esc).join(', ') + ' \u2014 highest combined Perception + measured pace, the pair/trio most likely to catch what speed would miss.</p></div>' +
+      '</div>';
+    }
+
+    var profileCard = '<div class="card mt18"><div class="eb">Group profile \u2014 average across ' + g.n + ' people</div>' +
+        '<p class="sub mt8" style="font-size:12.5px">Each bar is the group\u2019s mean score on that dimension; the variance figure underneath is how spread out individuals are around it \u2014 the lower it is, the more the group actually agrees on that trait rather than just averaging out to the middle.</p>' +
+        '<div class="mt10">' + avgBars + '</div>' +
+        '<p class="sub mt14" style="font-size:13px">Run through the same classifier as an individual result, the group\u2019s averaged profile reads closest to <b style="color:var(--ink)">' + archEmoji(g.teamMatch.key) + ' ' + esc(g.teamMatch.arche.name) + '</b>. This isn\u2019t any one person\u2019s type \u2014 it\u2019s a synthetic read of the group\u2019s center of gravity, useful for spotting the collective tendency rather than describing any individual accurately.</p>' +
+        '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Most aligned dimension</b>' +
+          '<p class="sub mt6" style="font-size:13px">' + esc(DIMS[g.aligned].name) + ' (' + esc(DIMS[g.aligned].blurb) + ') \u2014 the group scores unusually close together here (variance ' + g.variance[g.aligned] + '), meaning it\u2019s unlikely to be a source of internal friction.</p></div>' +
+        '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Most scattered dimension</b>' +
+          '<p class="sub mt6" style="font-size:13px">' + esc(DIMS[g.divergent].name) + ' (' + esc(DIMS[g.divergent].blurb) + ') \u2014 the widest spread in the group (variance ' + g.variance[g.divergent] + '). Worth naming explicitly if this dimension touches how the group works together (pace, risk appetite, how directly people surface disagreement).</p>' +
+          '<p class="sub mt6" style="font-size:12px;color:var(--faint);font-style:italic">Facilitation prompt: ' + esc(FACILITATION_PROMPTS[g.divergent]) + '</p></div>' +
+        '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Strongest pairing</b>' +
+          '<p class="sub mt6" style="font-size:13px">' + esc(g.best.a) + ' \u00d7 ' + esc(g.best.b) + ' at ' + g.best.score + ' \u2014 the group\u2019s easiest, most instinctive working relationship on paper.</p></div>' +
+        '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13px">Widest pairing</b>' +
+          '<p class="sub mt6" style="font-size:13px">' + esc(g.worst.a) + ' \u00d7 ' + esc(g.worst.b) + ' at ' + g.worst.score + '. ' + esc(g.worst.conflict.why) + '</p></div>' +
+        '<p class="sub mt14" style="font-size:12px;color:var(--faint)">Average pairwise compatibility across the whole group: ' + g.avgPairScore + '.</p>' +
+      '</div>';
+    var GI = GroupInsights.build(members, g);
+    var gt = state.groupTab;
+    var tabsDef = [['overview', 'Overview'], ['story', 'Narrative'], ['members', 'Members'], ['heat', 'Heatmap'], ['insights', 'Insights'], ['scen', 'Scenarios'], ['roles', 'Roles'], ['traits', 'Traits'], ['team', 'Teamwork'], ['pairs', 'Pairs']];
+    var tabBar = tabsHTML(tabsDef, gt, 'gtab', 'data-tab', 'Group report sections', 'tabpanel-gtab');
+    var tabBody = gt === 'story' ? groupStoryTab(GI) + groupFacetStory(members)
+      : gt === 'scen' ? groupScenTab(members)
+      : gt === 'roles' ? groupRolesTab(members)
+      : gt === 'traits' ? traitDuoGroupHTML(members)
+      : gt === 'team' ? groupTeamTab(members)
+      : gt === 'members' ? groupMembersTab(members, g, GI, subgroupCard)
+      : gt === 'heat' ? groupHeatTab(members, g, GI) + groupFacetHeat(members)
+      : gt === 'insights' ? groupInsightsTab(g, GI)
+      : gt === 'pairs' ? groupPairsTab(members, g)
+      : groupHealthCard(GI, g) + profileCard;
+    var gadv = PsychePolicy.groupAdvisory(members.length);
+    analysis = '<div class="card mt14" role="note"><div class="eb">' + (gadv.tier === 'ok' ? 'How to read this' : 'Small group') + '</div><p class="sub mt6" style="font-size:12.5px">' + esc(gadv.text) + '</p><p class="sub mt6" style="font-size:12px;color:var(--faint)">' + esc(PsychePolicy.USE_LIMITS) + '</p></div>' + tabBar + '<div role="tabpanel" id="tabpanel-gtab" aria-labelledby="tab-gtab-' + esc(gt) + '">' + tabBody + '</div>' +
+      '<button class="btn ghost block mt14" data-act="exportgrouppdf">Export full group report (PDF)</button>' +
+      '<p class="sub mt10" style="font-size:12px;color:var(--faint)">Not sure what a term above means? <button type="button" class="linkbtn inline" data-act="glossary">See the full glossary \u2192</button></p>';
+  } else if (members.length === 1) {
+    analysis = '<p class="sub mt14" style="font-size:13px">Invite at least one more person who has taken the test to see the group analysis \u2014 pairwise scores, the group\u2019s average profile, and where the team is most aligned or most scattered.</p>';
+  }
+
+  return topbar('Group', 'home') +
+    '<div class="wrap">' +
+      '<div class="eb">Team & group comparison</div>' +
+      '<p class="sub mt8" style="font-size:13px">Create a group, invite people by email, and once they join the whole analysis runs here from the scores each member chose to share.</p>' +
+      (gate || socialHTML) + (activeG ? analysis : '') + dimGuide +
+      '<button class="btn ghost block mt24" data-act="home">Back home</button>' +
+    '</div>';
+}
+
+/* ---------------- SCIENTIFIC BREAKDOWN ---------------- */
+function viewScience() {
+  var tabs = [
+    ['model', 'The model'],
+    ['items', 'Item design'],
+    ['scoring', 'Scoring'],
+    ['quality', 'Response quality'],
+    ['archetype', 'Archetypes'],
+    ['compat', 'Compatibility math'],
+    ['limits', 'Limitations']
+  ];
+  var t = state.scienceTab;
+  var sec = function (title, body) { return '<div class="card mt14"><div class="eb">' + esc(title) + '</div>' + body + '</div>'; };
+  var p = function (s) { return '<p class="sub mt10" style="font-size:13.5px">' + s + '</p>'; };
+
+  var body = '';
+  if (t === 'model') {
+    body =
+      p('PRISM scores five broad dimensions \u2014 Perception, Response, Identity, Social, Motivation \u2014 each built from 4 narrower facets, 20 facets total. The design borrows a common idea from trait-based personality models in academic psychology (such as the Big Five and HEXACO): broad dimensions that break down into narrower facets, each scored on a continuous scale. PRISM\u2019s dimensions and facets are its own, not those models, and some of them have no established counterpart there.') +
+      p('Whether the five-dimension structure actually holds in real answers has not been tested. Established instruments such as the NEO-PI-R rest on years of large-sample factor analysis, cross-cultural replication, and peer review; PRISM has none of that yet. It is a structured self-reflection framework, not a validated measurement instrument \u2014 see Limitations.') +
+      p('Every facet is scored on a continuous 0\u2013100 scale between two named poles (e.g. Conceptual \u2194 Concrete), not a binary. Because each facet has only two questions, a facet score can only be 0, 13, 25, 38, 50, 63, 75, 88 or 100. Two scores on the same side of the midpoint, such as 63 and 100, are described very differently in the generated text \u2014 the wording scales with how far a score sits from the midpoint, not just which side of it falls on.');
+  } else if (t === 'items') {
+    body =
+      p('40 questions total, 2 per facet, answered on a 5-point Likert scale (Strongly disagree \u2192 Strongly agree). Two items per facet is a minimal, not extensive, item pool \u2014 enough to compute a score, not enough to report the kind of internal-consistency statistics (like Cronbach\u2019s alpha) a validated instrument would need per facet.') +
+      p('Items are weighted, not just summed: each question carries a direction weight (+1 or \u22121) so that some items are reverse-keyed \u2014 agreeing with a reverse-keyed item pulls the facet score toward the opposite pole. Pairing a statement with its opposite is meant to reduce acquiescence bias (the tendency to agree with statements regardless of content), and the Response Quality check (below) uses it to spot contradictory answering. The two statements in a pair are not always strict opposites, and how well they work together has not been measured yet.') +
+      p('The assessment itself is fully deterministic: the same 40 answers always produce the same facet scores, dimension scores, and archetype. Nothing about the scoring pipeline is randomized \u2014 only the explanatory text layered on top of a computed score varies in phrasing.');
+  } else if (t === 'scoring') {
+    body =
+      p('Each facet score starts as a weighted sum: for every question mapped to that facet, the answer (1\u20135) is shifted to be centered on neutral ((answer \u2212 3)), then multiplied by that question\u2019s direction weight, and the two questions per facet are summed. That raw sum is then normalized against the maximum possible score for that facet and rescaled to a 0\u2013100 range.') +
+      p('A dimension score is simply the mean of its 4 facet scores. This is an unweighted, equal-contribution average \u2014 no facet is treated as more diagnostic of the dimension than another.') +
+      p('Signature traits (the handful of facets highlighted as most "defining" for a given person) aren\u2019t independently computed \u2014 they\u2019re just the facets whose score sits furthest from the 50 midpoint, ranked by that distance. The generated sentences describing them scale intensity language to that same distance: a facet at 52 is described as barely leaning either way; a facet at 95 is described as one of the more defining traits in the profile.');
+  } else if (t === 'quality') {
+    body =
+      p('Every result carries a confidence score, and it is not just a measure of "how extreme" the scores are \u2014 it factors in how the assessment was actually taken. Three response-quality signals are computed from the raw answers before any facet scoring happens:') +
+      '<ul style="font-size:13.5px;color:var(--mut);line-height:1.7;padding-left:20px;margin:10px 0">' +
+        '<li><b>Engagement</b> \u2014 average distance of each answer from the neutral midpoint. Someone who marks every question "Neutral" produces a near-zero engagement score.</li>' +
+        '<li><b>Spread</b> \u2014 the standard deviation of all 40 answers. Very low spread means most answers clustered on one or two response values.</li>' +
+        '<li><b>Consistency</b> \u2014 for each facet\u2019s 2 questions, how well they agree once the reverse-keyed one is flipped, averaged across all 20 facets. Someone who agrees with both a statement and its opposite scores low; someone who gives answers pointing the same way on both scores high.</li>' +
+      '</ul>' +
+      p('If engagement and spread both fall below a threshold, the answer set is flagged as <b>straight-lining</b> (the same response repeated with little variation, a known validity risk in any Likert-based instrument) and the confidence score is sharply discounted \u2014 multiplied by roughly a third \u2014 regardless of how the scores would otherwise look. A results screen with a straight-lining flag is telling you the numbers may not reflect real engagement with the questions, not just giving a low score for its own sake.') +
+      p('The final confidence percentage combines dimension separation (how far the top dimension leads the second), overall spread across all 5 dimensions, and the consistency signal above \u2014 then scales the whole thing down if engagement was low, on the reasoning that a flat, low-effort answer set shouldn\u2019t produce a confidently-stated result even if the raw numbers happen to look decisive.');
+  } else if (t === 'archetype') {
+    body =
+      p('36 archetypes come from a rule-based classifier applied to the 5 dimension scores \u2014 not a lookup table and not machine-learned clustering. The rules: rank the 5 dimensions by score; if the gap between the highest and lowest dimension is under 10 points, the profile is classified as balanced (the "PRISM" type, no single dimension dominant). If one dimension leads the next-highest by 18+ points, the profile is a "Pure" type for that dimension. If the top two dimensions are within 6 points of each other, it\u2019s a "Twin" type combining both. Otherwise, it\u2019s a two-dimension blend of the top two.') +
+      p('This means the archetype label is a direct, transparent function of the same 5 numbers shown on the results screen \u2014 not a separate hidden score. Two people with the same top-2 dimensions and a similar gap between them will land on the same archetype, by design.') +
+      p('The archetype library\u2019s 36 entries use a representative "exemplar" score profile for each type, clearly labeled as illustrative \u2014 useful for browsing what a type generally looks like, but not a substitute for an actual reading from real answers.');
+  } else if (t === 'compat') {
+    body =
+      p('Compatibility score starts from the average absolute difference across all 5 dimensions between two people\u2019s scores, then converts that average gap into a 0\u2013100 score, clipped to a 32\u201397 range so no pairing reads as either a perfect 100 or a hopeless 0 \u2014 the underlying claim is "how numerically close are these two profiles," not a verdict on whether two people should be together.') +
+      p('The trait-by-trait breakdown (shown on the Compatibility screen) classifies each of the 5 dimensions independently into one of four states \u2014 both people high, both low, a wide split (24+ points apart), or generally aligned \u2014 and generates dimension-specific text for that exact combination. A per-dimension "harmony" percentage (roughly 100 minus the score gap, scaled) drives the comparison bars.') +
+      p('The Conflict Style section takes the single largest gap across the 5 dimensions and, only if that gap is meaningful (15+ points), explains the likely mechanism behind friction on that specific dimension and offers one concrete way to address it. Below that threshold, the tool explicitly says no dimension shows a strong fault line, rather than manufacturing a friction narrative where the data doesn\u2019t support one.') +
+      p('Group analysis (2+ people) runs the exact same pairwise compatibility calculation for every possible pair in the group, plus per-dimension variance across the whole group to identify where the team is unusually aligned or unusually scattered \u2014 no new formula, just the same pairwise math applied at scale.');
+  } else if (t === 'limits') {
+    body =
+      p('This is a self-report instrument: every score reflects how someone answered 40 statements about themselves, not an outside behavioral observation. Self-report measures depend on how someone sees themselves (or wants to be seen) in the moment they\u2019re answering.') +
+      p('PRISM has not been through the peer-reviewed validation process a clinical or research-grade personality instrument requires \u2014 no published factor analysis confirming the 5-dimension structure holds up statistically, no test-retest reliability data showing scores are stable over time, no criterion validity studies checking scores against independent, real-world outcomes.') +
+      p('Personality, including in validated instruments, is not perfectly stable \u2014 mood, context, recent events, and even the order questions are asked in can shift how someone answers. A single sitting produces one read, not a fixed, permanent label.') +
+      p('Two practical consequences of the design. First, with two questions per facet, one different answer can move a facet score by 12 or 13 points, so small differences between facets or between sittings are likely noise. Second, the archetype is decided by thresholds on small gaps between dimension scores, so retaking the assessment can plausibly give a different archetype even if you feel the same. Treat the archetype as a prompt for reflection, and the dimension scores as the steadier summary.') +
+      p('None of this is a diagnostic or clinical tool, and it does not screen for, indicate, or rule out any mental health condition. It\u2019s a structured self-reflection tool, intended to help you notice patterns and prompt conversation. Whether it does so has not been tested, and it is not a substitute for professional assessment.');
+  }
+
+  return topbar('The science', 'home') +
+    '<div class="wrap">' +
+      '<div class="eb">Scientific breakdown</div>' +
+      '<p class="sub mt8" style="font-size:13px">What PRISM is actually built on, how each number on your results screen is computed, and \u2014 just as important \u2014 what this tool is not. Written to be checked, not just taken on faith.</p>' +
+      tabsHTML(tabs, t, 'scitab', 'data-tab', 'Scientific breakdown sections', 'tabpanel-scitab') +
+      '<div role="tabpanel" id="tabpanel-scitab" aria-labelledby="tab-scitab-' + esc(t) + '">' + sec(tabs.filter(function (tb) { return tb[0] === t; })[0][1], body) + '</div>' +
+      '<button class="btn ghost block mt24" data-act="home">Back home</button>' +
+    '</div>';
+}
+
+
+function exportFullPDF() {
+  var r = state.result, m = r.match;
+  var boxes = document.querySelectorAll('input[data-exp]'), chosen = [];
+  Array.prototype.forEach.call(boxes, function (b) { if (b.checked) chosen.push(b.getAttribute('data-exp')); });
+  if (boxes.length && !chosen.length) { announce('Choose at least one section to include.'); return; }
+  document.getElementById('printReport').innerHTML = buildFullReportHTML(r, m, boxes.length ? chosen : undefined);
+  window.print();
+}
+
+function exportCompatPDF() {
+  if (!state.result || !state.user) return;
+  var mine = { name: myName(), dims: state.result.dims, key: state.result.match.key, facets: state.result.facets };
+  var them = currentCompareThem();
+  if (!them) return;
+  var c = Engine.compatibility(mine.dims, them.dims, mine.name, them.name);
+  var dc = Engine.deepCompatibility(mine.dims, them.dims, mine.name, them.name);
+  var archNarrative = archPairNarrative(mine.key, them.key, mine.name, them.name);
+  document.getElementById('printReport').innerHTML = buildCompatReportHTML(mine, them, c, dc, archNarrative);
+  window.print();
+}
+
+function exportGroupPDF() {
+  if (!state.user || !state.activeGroup) return;
+  var ppl = groupPeople(state.activeGroup);
+  if (ppl.length < 2) return;
+  var g = Engine.groupAnalysis(ppl);
+  document.getElementById('printReport').innerHTML = buildGroupReportHTML(ppl, g);
+  window.print();
+}
+
+/* ---------------- GLOSSARY (shared reference, linked from Compatibility & Group) ---------------- */
+function viewGlossary() {
+  var entry = function (term, body) { return '<div class="mt14" style="padding-top:12px;border-top:1px solid var(--line)"><b style="font-size:13.5px">' + esc(term) + '</b><p class="sub mt6" style="font-size:12.5px">' + body + '</p></div>'; };
+  return topbar('Glossary', 'home') +
+    '<div class="wrap">' +
+      '<div class="eb">Glossary & reference</div>' +
+      '<p class="sub mt8" style="font-size:13px">Every term used across Compatibility and Group comparison, defined once, in one place \u2014 so you don\u2019t have to re-read the same explainer cards every visit.</p>' +
+      '<div class="card mt14"><div class="eb">The 5 dimensions</div>' +
+        DIM_ORDER.map(function (d) {
+          return '<div class="row" style="margin-top:8px;gap:8px;align-items:baseline"><span style="width:8px;height:8px;border-radius:50%;background:' + DIMS[d].color + ';flex:none;transform:translateY(-1px)"></span>' +
+            '<span style="font-size:12.5px"><b>' + esc(DIMS[d].name) + '</b> \u2014 ' + esc(DIMS[d].blurb) + '</span></div>';
+        }).join('') +
+      '</div>' +
+      '<div class="card mt14"><div class="eb">Compatibility terms</div>' +
+        entry('Compatibility score', 'The average gap between two people\u2019s scores across all 5 dimensions, converted to a 0\u2013100 scale and clipped to 32\u201397. Roughly: 80+ strong, 60\u201379 solid, 45\u201359 workable, below 45 a genuinely wide gap.') +
+        entry('% aligned (trait-by-trait)', 'A per-dimension figure, roughly 100 minus the gap on that one dimension. Not a slice of the overall compatibility score \u2014 a separate, dimension-specific number.') +
+        entry('Shared ground', 'A note flagging a dimension you both score high on \u2014 easy, instinctive territory.') +
+        entry('Natural division', 'A note flagging a wide gap on one dimension, framed as a possible complement rather than a clash.') +
+        entry('Watch: \u2026 (two centers / distance / pace)', 'A note flagging a specific pattern worth being aware of \u2014 both high on Identity (two firm centers), both low on Social (neither reaches out first), or a wide Response gap (mismatched tempo).') +
+        entry('Quiet balance', 'Nothing on the profile strongly stands out either way \u2014 not a bad sign, just a flatter comparison.') +
+        entry('Similarity-attraction vs. complementarity', 'Two established but competing ideas in personality psychology: that shared traits ease connection, or that different traits expand what a pair can cover together. This tool reports the gap and doesn\u2019t take a side.') +
+        entry('Archetype pairing', 'A narrative built from each person\u2019s own archetype \u2014 name, tag, lead strength, known weak point, and stress pattern \u2014 showing how the two specific archetypes tend to interact, not just the raw dimension numbers.') +
+      '</div>' +
+      '<div class="card mt14"><div class="eb">Group terms</div>' +
+        entry('Average profile', 'The group\u2019s scores on each dimension, averaged across everyone in it \u2014 the group\u2019s center of gravity, not an accurate description of any one person.') +
+        entry('Variance', 'How spread out individual scores are around the group average, dimension by dimension. Low variance = the group genuinely agrees there; high variance = a real, measurable split.') +
+        entry('Team archetype', 'The group\u2019s average profile, run through the same 36-archetype classifier used for an individual result \u2014 names the group\u2019s collective tendency, not any person\u2019s type.') +
+        entry('Pairwise matrix', 'Every two-person combination in the group, scored exactly like 1:1 Compatibility.') +
+        entry('Natural role', 'A heuristic label (e.g. Decision-driver, Mediator, Steady executor) derived from each person\u2019s top two dimensions \u2014 a tendency, not a job assignment.') +
+        entry('Natural sub-groupings', 'For groups of 5+, which people the numbers lean toward for two different working modes \u2014 fast decisions vs. careful review \u2014 based on combined dimension scores. Illustrative, not a staffing decision.') +
+        entry('Facilitation prompt', 'A ready-to-use conversation starter tied to the group\u2019s most scattered dimension, meant for an actual team discussion.') +
+      '</div>' +
+      '<button class="btn ghost block mt24" data-act="home">Back home</button>' +
+    '</div>';
+}
+
+
+function exportShareCard() {
+  var r = state.result, m = r.match;
+  var canvas = document.createElement('canvas');
+  canvas.width = 480; canvas.height = 560;
+  var ctx = canvas.getContext('2d');
+  var dark = state.theme === 'dark';
+  ctx.fillStyle = dark ? '#0B0A12' : '#F4F5FA';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = dark ? '#6D6980' : '#A39B87';
+  ctx.font = '600 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('PSYCHE CORE \u00b7 PRISM INSTRUMENT', 240, 46);
+
+  ctx.fillStyle = dark ? '#F5F4FA' : '#171410';
+  ctx.font = "700 30px 'Bricolage', 'Segoe UI', Arial, sans-serif";
+  wrapText(ctx, archEmoji(m.key) + ' ' + m.arche.name, 240, 100, 400, 34);
+
+  ctx.font = '12px monospace';
+  ctx.fillStyle = dark ? '#A5A1B8' : '#6B6455';
+  ctx.fillText(m.code + '  \u00b7  ' + m.confidence + '% confidence', 240, 150);
+
+  // radar
+  var cx = 240, cy = 320, R = 130;
+  var colors = { P: '#8B5CF6', R: '#3D82F6', I: '#FBBF24', S: '#FB5D8A', M: '#2DD4A0' };
+  ctx.strokeStyle = dark ? '#2A2836' : '#EAE3D3';
+  for (var ring = 1; ring <= 4; ring++) {
+    ctx.beginPath();
+    for (var i = 0; i <= 5; i++) {
+      var angle = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+      var rr = (R * ring) / 4;
+      var x = cx + rr * Math.cos(angle), y = cy + rr * Math.sin(angle);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  DIM_ORDER.forEach(function (d, i) {
+    var angle = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+    var rr = (R * r.dims[d]) / 100;
+    var x = cx + rr * Math.cos(angle), y = cy + rr * Math.sin(angle);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(139,92,246,0.2)';
+  ctx.fill();
+  ctx.strokeStyle = '#8B5CF6';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  ctx.font = '600 13px monospace';
+  DIM_ORDER.forEach(function (d, i) {
+    var angle = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+    var x = cx + (R + 24) * Math.cos(angle), y = cy + (R + 24) * Math.sin(angle);
+    ctx.fillStyle = colors[d];
+    ctx.fillText(d, x, y);
+  });
+
+  ctx.fillStyle = dark ? '#6D6980' : '#A39B87';
+  ctx.font = '11px monospace';
+  ctx.fillText('psyche.monster', 240, 530);
+
+  var link = document.createElement('a');
+  link.download = 'psyche-' + m.arche.name.replace(/\s+/g, '-').toLowerCase() + '.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+}
+function exportCompatCard() {
+  var r = state.result, them = currentCompareThem();
+  if (!r || !them) return;
+  var mine = { name: myName(), dims: r.dims, key: r.match.key };
+  var c = Engine.compatibility(mine.dims, them.dims, mine.name, them.name);
+  var dark = state.theme === 'dark';
+  var ink = dark ? '#F4F3FA' : '#12111A', mut = dark ? '#B0ADC4' : '#4F4D63', line = dark ? '#2B2939' : '#DCDEEB';
+  var draw = function () {
+    var W = 720, H = 900, canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d'), F = "'Bricolage', 'Segoe UI', Arial, sans-serif";
+    ctx.fillStyle = dark ? '#0B0A12' : '#F4F5FA'; ctx.fillRect(0, 0, W, H);
+    var g = ctx.createRadialGradient(W, 0, 20, W, 0, 520);
+    g.addColorStop(0, dark ? 'rgba(139,92,246,.35)' : 'rgba(109,40,217,.18)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = mut; ctx.font = '600 22px ' + F; ctx.fillText('Psyche Core', W / 2, 64);
+    ctx.fillStyle = ink; ctx.font = '700 44px ' + F;
+    wrapText(ctx, (mine.key ? archEmoji(mine.key) + ' ' : '') + mine.name + '  ×  ' + them.name + (them.key ? ' ' + archEmoji(them.key) : ''), W / 2, 130, 640, 50);
+    // score ring
+    var cx = W / 2, cy = 300, rr = 92;
+    ctx.lineWidth = 16; ctx.lineCap = 'round';
+    ctx.strokeStyle = line; ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = ink; ctx.beginPath(); ctx.arc(cx, cy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * c.score / 100); ctx.stroke();
+    ctx.fillStyle = ink; ctx.font = '700 64px ' + F; ctx.fillText(String(c.score), cx, cy + 14);
+    ctx.fillStyle = mut; ctx.font = '500 20px ' + F; ctx.fillText('compatibility', cx, cy + 46);
+    var verdict = c.score >= 80 ? 'A strong match on paper' : c.score >= 60 ? 'A solid match with room to grow' : c.score >= 45 ? 'Workable, with attention' : 'Very different, so worth talking about';
+    ctx.fillStyle = ink; ctx.font = '600 28px ' + F; ctx.fillText(verdict, cx, 450);
+    // overlay radar
+    var rcx = W / 2, rcy = 660, R = 130, n = 5, colors = { P: '#8B5CF6', R: '#4C8DF8', I: '#FBBF24', S: '#FB5D8A', M: '#2DD4A0' };
+    var pt = function (i, k) { var a = -Math.PI / 2 + i * 2 * Math.PI / n; return [rcx + Math.cos(a) * R * k, rcy + Math.sin(a) * R * k]; };
+    ctx.lineWidth = 1; ctx.strokeStyle = line;
+    [0.25, 0.5, 0.75, 1].forEach(function (k) { ctx.beginPath(); DIM_ORDER.forEach(function (d, i) { var p = pt(i, k); i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.closePath(); ctx.stroke(); });
+    var poly = function (dims, fill, stroke, dash) {
+      ctx.beginPath(); DIM_ORDER.forEach(function (d, i) { var p = pt(i, dims[d] / 100); i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.closePath();
+      ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = stroke; ctx.setLineDash(dash); ctx.stroke(); ctx.setLineDash([]);
+    };
+    poly(mine.dims, dark ? 'rgba(244,243,250,.14)' : 'rgba(18,17,26,.12)', ink, []);
+    poly(them.dims, 'rgba(251,93,138,.16)', '#FB5D8A', [8, 6]);
+    ctx.font = '700 18px ' + F;
+    DIM_ORDER.forEach(function (d, i) { var p = pt(i, 1.2); ctx.fillStyle = colors[d]; ctx.fillText(DIMS[d].name, p[0], p[1] + 6); });
+    ctx.font = '500 18px ' + F; ctx.textAlign = 'left';
+    ctx.fillStyle = ink; ctx.fillText('● ' + mine.name, 60, 850);
+    ctx.fillStyle = '#FB5D8A'; ctx.textAlign = 'right'; ctx.fillText('● ' + them.name, W - 60, 850);
+    ctx.textAlign = 'center'; ctx.fillStyle = mut; ctx.font = '500 18px ' + F; ctx.fillText('psyche.monster', W / 2, 880);
+    var link = document.createElement('a');
+    link.download = 'psyche-compatibility.png'; link.href = canvas.toDataURL('image/png'); link.click();
+    toast('Image saved');
+  };
+  if (document.fonts && document.fonts.load) document.fonts.load("700 40px Bricolage").then(draw, draw); else draw();
+}
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  var words = text.split(' '), line = '', lines = [];
+  words.forEach(function (w) {
+    var test = line + w + ' ';
+    if (ctx.measureText(test).width > maxWidth && line !== '') { lines.push(line); line = w + ' '; }
+    else line = test;
+  });
+  lines.push(line);
+  var startY = y - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach(function (l, i) { ctx.fillText(l.trim(), x, startY + i * lineHeight); });
+}
+
+/* Domain phrase per facet, used by the dynamic 20-facts generator.
+   Matches the 20 real facet keys defined in DIMS above. */
+var FACET_DOMAINS = {
+  'P.abstraction': 'how you take in information',
+  'P.curiosity': 'how you relate to novelty',
+  'P.attention': 'how wide your attention spreads',
+  'P.intuition': 'how you extract meaning from what you observe',
+  'R.tempo': 'how quickly you act on a decision',
+  'R.expression': 'how openly you show what you feel',
+  'R.adaptability': 'how you respond when a plan changes',
+  'R.risk': 'how you weigh a bet against its downside',
+  'I.autonomy': 'whose judgment you steer by',
+  'I.conviction': 'how easily your beliefs move under pressure',
+  'I.distinct': 'whether you aim to stand apart or belong',
+  'I.stability': 'how consistent your sense of self stays across contexts',
+  'S.warmth': 'how you lead in a new interaction',
+  'S.gregarious': 'where you recharge',
+  'S.empathy': 'how you read what someone else is feeling',
+  'S.harmony': 'how you handle friction in a group',
+  'M.drive': 'what keeps you reaching for more',
+  'M.discipline': 'whether structure or spontaneity fuels your follow-through',
+  'M.ambition': 'the scale of what you aim at',
+  'M.persistence': 'what happens when the initial spark fades',
+};
+
+function buildFacetDefsAndScores(facets) {
+  var defs = {}, scores = {};
+  DIM_ORDER.forEach(function (d) {
+    Object.keys(DIMS[d].facets).forEach(function (fk) {
+      var key = d + '.' + fk, fac = DIMS[d].facets[fk];
+      defs[key] = { domain: FACET_DOMAINS[key] || ('your ' + fac.name.toLowerCase()), hi: fac.hi, lo: fac.lo };
+      scores[key] = facets[key];
+    });
+  });
+  return { defs: defs, scores: scores };
+}
+
+function wireActions() {
+  document.querySelectorAll('[data-act]').forEach(function (btn) {
+    // elements that act as buttons but are not <button>: Enter and Space must work like a click
+    if (btn.tagName !== 'BUTTON' && btn.getAttribute('role') === 'button') {
+      btn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); } });
+    }
+    btn.addEventListener('click', function () {
+      var act = btn.getAttribute('data-act');
+      if (act === 'start') { if (!state.introSeen && !readDraft()) { state.screen = 'intro'; render(); } else startAssessment(); }
+      else if (act === 'intro') { state.screen = 'intro'; render(); }
+      else if (act === 'begin') { state.introSeen = true; persist(); startAssessment(); }
+      else if (act === 'resume') { resumeAssessment(); }
+      else if (act === 'gotoq') { state.qIndex = +btn.getAttribute('data-i'); state.fromReview = true; state.qDir = ''; state.screen = 'assessment'; state.focus = 'question'; render(); }
+      else if (act === 'finishforce') { finishAssessment(); }
+      else if (act === 'dismissnotice') { state.notice = null; render(); }
+      else if (act === 'wipelocal') {
+        var unsynced = !!state.result && state.syncStatus !== 'saved';
+        if (!window.confirm('Remove your result, answers, saved progress, notes and ratings from this device?' + (unsynced ? '\n\nYour latest result is NOT saved to your account, so it will be lost.' : '\n\nYour saved account copy is not affected.'))) return;
+        PsychePrivacy.wipeLocal(ls()); state.result = null; state.resultAt = 0; state.resultOwner = undefined; state.syncPaused = false; state.answers = []; state.qIndex = 0; persist();
+        state.notice = 'Data on this device was cleared.'; render();
+      }
+      else if (act === 'goresults') { state.screen = 'results'; render(); }
+      else if (act === 'traitsjson') {
+        if (!state.result) return;
+        try {
+          var blob = new Blob([JSON.stringify(TraitsEngine.generate(state.result), null, 2)], { type: 'application/json' });
+          var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'psyche-traits.json';
+          document.body.appendChild(a); a.click(); a.remove();
+        } catch (e) {}
+      }
+      else if (act === 'account') { state.authError = null; state.authNotice = null; state.delOpen = false; state.delError = null; state.screen = state.user ? 'account' : 'auth'; render(); if (state.user) refreshSocial(); }
+      else if (act === 'google') {
+        state.authError = null; state.authNotice = null; state.authBusy = true; render();
+        AUTH.signInWithGoogle().then(function (r) { if (r.error) authDone({ authError: r.error }); /* else: browser is redirecting to Google */ });
+      }
+      else if (act === 'authmode') { state.authMode = btn.getAttribute('data-mode'); state.authError = null; state.authNotice = null; render(); }
+      else if (act === 'signout') {
+        state.authBusy = true; render();
+        AUTH.signOut().then(function (r) {
+          if (r.error) return authDone({ authError: r.error });
+          // Don't leave a signed-in user's result behind on a shared device once it is safely in their account.
+          if (state.syncStatus === 'saved') { PsychePrivacy.wipeLocal(ls()); state.result = null; state.resultAt = 0; state.resultOwner = undefined; state.syncPaused = false; state.answers = []; persist(); }
+          else if (state.result) state.notice = 'Signed out. Your latest result is not saved to your account, so it stays on this device until you sign in again.';
+          state.user = null; state.syncStatus = null; resetSocial();
+          authDone({ screen: 'home' });
+        });
+      }
+      else if (act === 'delopen') { refreshSocial().then(function () { state.delOpen = true; state.delError = null; render(); }); } /* refresh first so the counts and owned-group warning are current */
+      else if (act === 'delcancel') { state.delOpen = false; state.delError = null; render(); }
+      else if (act === 'syncnow') { pushResult(true).then(function () { render(); }); render(); }
+      else if (act === 'deletecloud') {
+        if (!window.confirm('Delete the copy of your result saved in your account? This also stops sharing your scores with connections and groups. The copy on this device is kept, and it will not be uploaded again unless you choose “Sync now”.')) return;
+        AUTH.deleteMyResult(state.user.id).then(function (r) {
+          if (!r.missing) return r;
+          // older database without delete_my_result(): fall back to the two separate deletes
+          return AUTH.deleteResult(state.user.id).then(function (d) { return d.error ? d : AUTH.saveProfile(state.user.id, state.user.email, myName(), null); });
+        }).then(function (r) {
+          if (!r.error) { state.syncPaused = true; persist(); }
+          authDone(r.error ? { authError: r.error } : { authNotice: 'Saved copy deleted from your account. It will not be uploaded again unless you choose “Sync now”.', syncStatus: 'paused' });
+        });
+      }
+      else if (act === 'home') {
+        if ((state.screen === 'assessment' || state.screen === 'review') && answeredCount() > 0) { saveDraft(); toast('Progress saved on this device. Resume from the home page.'); }
+        state.screen = 'home'; state.fromReview = false; render();
+      }
+      else if (act === 'answer') { answerCurrent(+btn.getAttribute('data-v'), btn); }
+      else if (act === 'skipq') { advanceQuestion(); }
+      else if (act === 'prevq') {
+        if (state.fromReview) { state.fromReview = false; state.screen = 'review'; render(); }
+        else { state.qDir = 'back'; state.qIndex = Math.max(0, state.qIndex - 1); state.focus = 'question'; saveDraft(); render(); }
+      }
+      else if (act === 'tab') { state.resultsTab = btn.getAttribute('data-tab'); render(); }
+      else if (act === 'dynmore') { state.dynMore = true; render(); }
+      else if (act === 'dynless') { state.dynMore = false; render(); }
+      else if (act === 'toggletheme') { state.theme = state.theme === 'dark' ? 'light' : 'dark'; persist(); render(); }
+      else if (act === 'share') { exportShareCard(); }
+      else if (act === 'sharecompat') { exportCompatCard(); }
+      else if (act === 'exportpdf') { exportFullPDF(); }
+      else if (act === 'archlib') { state.screen = 'archlib'; render(); }
+      else if (act === 'archopen') { state.archKey = btn.getAttribute('data-key'); state.screen = 'archdetail'; render(); }
+      else if (act === 'compare') { state.screen = 'compare'; setSocialMsg(null); render(); refreshSocial(); }
+      else if (act === 'invitecompare') {
+        var ie = document.getElementById('inviteEmail').value.trim().toLowerCase();
+        state.inviteDraft = ie;
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ie)) { setSocialMsg('Enter a valid email address.'); return render(); }
+        if (ie === userEmail()) { setSocialMsg('That\u2019s your own email.'); return render(); }
+        doSocial(AUTH.inviteByEmail(state.user, myName(), ie), 'Invite saved for ' + ie + '. Tap \u201cCopy invite message\u201d below and send it to them.', function () { state.inviteDraft = ''; });
+      }
+      else if (act === 'makelink') { doSocial(AUTH.createLink(state.user, myName()), 'Link created \u2014 copy it below and send it to one person.'); }
+      else if (act === 'acceptconn') { doSocial(AUTH.acceptConnection(btn.getAttribute('data-id')), 'Connected! Tap \u201cCompare\u201d next to their name.'); }
+      else if (act === 'removeconn') {
+        if (btn.getAttribute('data-confirm') && !window.confirm('Remove this connection? You will both stop seeing each other\u2019s scores.')) return;
+        var rid = btn.getAttribute('data-id');
+        if (state.compareWith === rid) state.compareWith = null;
+        doSocial(AUTH.removeConnection(rid), 'Done.');
+      }
+      else if (act === 'comparewith') { state.compareWith = btn.getAttribute('data-id'); render(); window.scrollTo && window.scrollTo(0, 0); }
+      else if (act === 'exportcompatpdf') { exportCompatPDF(); }
+      else if (act === 'exportgrouppdf') { exportGroupPDF(); }
+      else if (act === 'glossary') { state.screen = 'glossary'; render(); }
+      else if (act === 'copycode') {
+        var codeToCopy = btn.getAttribute('data-code');
+        var markCopied = function () { state.codeCopied = true; render(); setTimeout(function () { state.codeCopied = false; render(); }, 2000); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(codeToCopy).then(markCopied, function () { fallbackCopy(codeToCopy, markCopied); });
+        } else {
+          fallbackCopy(codeToCopy, markCopied);
+        }
+      }
+      else if (act === 'group') { state.screen = 'group'; setSocialMsg(null); render(); refreshSocial(); }
+      else if (act === 'creategroup') {
+        var gn = document.getElementById('groupNewName').value.trim();
+        state.groupNameDraft = gn;
+        if (!gn) { setSocialMsg('Give the group a name.'); return render(); }
+        doSocial(AUTH.createGroup(gn), 'Group created. Invite people by email below.', function (r) { state.groupNameDraft = ''; state.activeGroup = r.id; });
+      }
+      else if (act === 'opengroup') { state.activeGroup = btn.getAttribute('data-id'); state.groupPair = null; state.groupTab = 'overview'; setSocialMsg(null); render(); refreshSocial(); }
+      else if (act === 'lens') { state.compatLens = btn.getAttribute('data-lens'); render(); }
+      else if (act === 'gtab') { state.groupTab = btn.getAttribute('data-tab'); render(); }
+      else if (act === 'grank') { state.groupRankDim = btn.getAttribute('data-dim'); render(); }
+      else if (act === 'gpair') { state.groupPair = [btn.getAttribute('data-a'), btn.getAttribute('data-b')]; render(); window.scrollTo && window.scrollTo(0, 0); }
+      else if (act === 'gpairclose') { state.groupPair = null; render(); }
+      else if (act === 'renamegroup') {
+        var rn = document.getElementById('groupRename').value.trim();
+        state.groupRenameDraft = rn;
+        if (!rn) { setSocialMsg('Enter a group name.'); return render(); }
+        doSocial(AUTH.renameGroup(state.activeGroup, rn), 'Group renamed.', function () { state.groupRenameDraft = ''; });
+      }
+      else if (act === 'backgroups') { state.activeGroup = null; state.groupPair = null; setSocialMsg(null); render(); }
+      else if (act === 'invitegroup') {
+        var ge = document.getElementById('groupInviteEmail').value.trim().toLowerCase();
+        state.groupInviteDraft = ge;
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ge)) { setSocialMsg('Enter a valid email address.'); return render(); }
+        doSocial(AUTH.inviteToGroup(state.activeGroup, ge), 'Invited ' + ge + '. They see it when they sign in with that email.', function () { state.groupInviteDraft = ''; });
+      }
+      else if (act === 'acceptgroup') { var agid = btn.getAttribute('data-id'); doSocial(AUTH.acceptGroup(agid), 'You joined the group.', function () { state.activeGroup = agid; }); }
+      else if (act === 'declinegroup') { doSocial(AUTH.removeGroupMember(btn.getAttribute('data-id'), userEmail()), 'Invitation declined.'); }
+      else if (act === 'leavegroup') {
+        if (!window.confirm('Leave this group? You will stop seeing each other\u2019s scores.')) return;
+        var lg = state.activeGroup; doSocial(AUTH.removeGroupMember(lg, userEmail()), 'You left the group.', function () { state.activeGroup = null; });
+      }
+      else if (act === 'removemember') {
+        if (!window.confirm('Remove this person from the group?')) return;
+        doSocial(AUTH.removeGroupMember(state.activeGroup, btn.getAttribute('data-email')), 'Removed.');
+      }
+      else if (act === 'deletegroup') {
+        if (!window.confirm('Delete this group for everyone?')) return;
+        var dg = state.activeGroup; doSocial(AUTH.deleteGroup(dg), 'Group deleted.', function () { state.activeGroup = null; });
+      }
+      else if (act === 'overview') { state.screen = 'home'; render(); }
+      else if (act === 'science') {
+        var sci = btn.getAttribute('data-sci');
+        if (sci) state.scienceTab = sci;
+        state.screen = 'science'; render();
+      }
+      else if (act === 'scitab') { state.scienceTab = btn.getAttribute('data-tab'); render(); }
+    });
+  });
+  wireAuthForms();
+  wireTablists();
+}
+
+/* Tabs: arrow keys, Home and End move focus between tabs; Enter or Space (a normal button press) selects. */
+function wireTablists() {
+  Array.prototype.forEach.call(document.querySelectorAll('[role="tablist"]'), function (list) {
+    list.addEventListener('keydown', function (e) {
+      var step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+      if (step === undefined && e.key !== 'Home' && e.key !== 'End') return;
+      var tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]')), i = tabs.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      var n = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
+      tabs.forEach(function (t, k) { t.setAttribute('tabindex', k === n ? '0' : '-1'); });
+      tabs[n].focus();
+    });
+  });
+}
+
+/* Number keys 1-5 answer the current question (the buttons stay fully usable without them). */
+document.addEventListener('keydown', function (e) {
+  if (state.screen !== 'assessment' || e.ctrlKey || e.metaKey || e.altKey) return;
+  var t = e.target; if (t && /^(input|textarea|select)$/i.test(t.tagName)) return;
+  if (/^[1-5]$/.test(e.key)) { var b = document.querySelector('.likertbtn[data-v="' + e.key + '"]'); if (b) { e.preventDefault(); answerCurrent(+e.key, b); } }
+});
+
+state.offline = (typeof navigator !== 'undefined' && navigator.onLine === false);
+window.addEventListener('offline', function () { state.offline = true; render(); announce('You are offline. What is already open keeps working.'); });
+window.addEventListener('online', function () { state.offline = false; render(); announce('You are back online.'); if (state.user && state.result && (state.syncStatus === 'offline' || state.syncStatus === 'error')) pushResult(); });
+PsycheOps.screenName = function () { return state.screen; };
+
+document.addEventListener('click', function (e) {
+  var b = e.target && e.target.closest ? e.target.closest('[data-fb]') : null;
+  if (!b) return;
+  var st = fbStore(); if (!st) return;
+  var kind = b.getAttribute('data-fb'), id = b.getAttribute('data-id');
+  if (kind === 'clearall') { st.clearAll(); render(); return; }
+  var holder = id ? document.getElementById('fb-' + id) : null;
+  if (kind === 'rate') {
+    var prev = st.get(id);
+    st.set(id, b.getAttribute('data-rating'), prev ? prev.note : '');
+  } else if (kind === 'note') {
+    var cur = st.get(id), ta = document.getElementById('fbn-' + id);
+    if (cur && ta) { st.set(id, cur.rating, ta.value); toast('Saved on this device'); }
+  } else if (kind === 'remove') { st.remove(id); }
+  if (holder) holder.innerHTML = fbRowHTML(id);
+});
+if (window.__PSYCHE_TEST__ === true) window.__PSYCHE_TEST__ = { state: state, load: load, computeResult: computeResult, syncAfterLogin: syncAfterLogin, pushResult: pushResult, finishAssessment: finishAssessment, answerCurrent: answerCurrent, render: render, skippedList: skippedList, resumeAssessment: resumeAssessment, startAssessment: startAssessment, exportCompatPDF: exportCompatPDF, exportGroupPDF: exportGroupPDF, buildFullReportHTML: buildFullReportHTML };
+captureJoinParam();
+// a saved result that could not be read is explained in a banner that stays until dismissed (a 2-second toast is too easy to miss)
+if (state.loadNotice) { state.notice = state.loadNotice; state.loadNotice = null; }
+render();
+if (AUTH.enabled) AUTH.init(onAuthEvent);
+})();
