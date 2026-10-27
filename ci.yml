@@ -1,0 +1,21 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: psyche-core } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: psyche-core/package-lock.json }
+      - run: npm ci
+      - run: npm test
+      - name: Performance budgets (bundle size + compute time)
+        run: npm run perf
+      - run: npx playwright-core install --with-deps chromium
+      - run: npm run test:e2e
+        env: { PLAYWRIGHT_BROWSERS_PATH: '0' }
+      - name: Dependency audit (dev dependencies only; the shipped site has no npm runtime dependencies)
+        run: npm audit --audit-level=high
+        continue-on-error: true
+# Not automated: supabase/tests/rls.test.sql needs a staging database. Run it by hand before every release (docs/STAGING_VERIFICATION.md).
