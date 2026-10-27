@@ -1,0 +1,6 @@
+{
+  "note": "One entry per MANUAL gate id (see tools/gates-lib.js). status 'met' needs date (YYYY-MM-DD), by, evidence. Set attached:false when you reported a result but have not stored the proof yet. Never mark a gate met because code exists; mark it met when the check was actually done.",
+  "gates": [
+    { "id": "S1", "status": "met", "date": "2026-10-26", "by": "Aryan (owner-reported)", "evidence": "Owner reported both SQL files (phase5-hardening.sql, rls.test.sql) ran successfully in the Supabase SQL editor.", "attached": false, "note": "Attach the SQL editor output / screenshot, and confirm the project was staging configured like production." }
+  ]
+}
