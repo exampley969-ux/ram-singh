@@ -1,0 +1,26 @@
+# Render Blueprint: static site. Only dist/ (built from psyche-core/) is published.
+services:
+  - type: web
+    runtime: static
+    name: psyche-core
+    rootDir: psyche-core
+    buildCommand: sh tools/build-static.sh
+    staticPublishPath: dist
+    domains:
+      - psyche.monster
+    headers:
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://*.supabase.co; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'; worker-src 'none'"
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=31536000
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: same-origin
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=(), payment=()
